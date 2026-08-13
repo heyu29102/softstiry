@@ -337,7 +337,7 @@ class Spammer:
             if not targets:
                 log.warning(f"{sid} | ⚠️ нет целей (контакты/группы)")
                 return "drop"
-            log.info(f"{sid} | 🎯 целей: {users_n} взаимных контактов + {groups_n} групп")
+            log.info(f"{sid} | 🎯 целей: {users_n} взаимных контактов + {groups_n} групп (круги)")
             return await self.send_loop(client, sid, path, targets, rng)
         except asyncio.CancelledError:
             raise
@@ -376,12 +376,13 @@ class Spammer:
                 await asyncio.sleep(jitter(config.DELAY_CYCLES, 0.0, rng, 5.0))
 
             if time.time() - start >= stint:
-                log.info(f"{sid} | ♻️ смена слота, отправлено {sent_local}")
+                log.info(f"{sid} | ♻️ смена слота (~{stint}с), отправлено {sent_local}")
                 return "rotate"
 
             target = targets[target_idx]
             target_idx += 1
             kind_tag = "ЛС" if target.kind == "user" else "группа"
+            pos = f"{target_idx}/{total}"
 
             try:
                 story = self.pick_story(rng)
