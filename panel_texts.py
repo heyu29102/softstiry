@@ -218,16 +218,18 @@ async def cb_stories(cb):
 async def cb_story_toggle(cb):
     refs = load_story_refs(config.STORIES_FILE)
     rows = [
-        "📖 Файл: <code>stories.txt</code> — одна история на строку.",
-        f"В пуле: <b>{len(refs)}</b>",
+        "📖 <b>Добавить story в рассылку</b>",
+        f"В пуле сейчас: <b>{len(refs)}</b>",
         "",
-        "Форматы:",
+        "Пришли ссылку или строку (можно несколько, с новой строки):",
+        "<code>https://t.me/testchanelkk/s/1</code>",
         "<code>channel|42</code>",
-        "<code>https://t.me/channel/s/42</code>",
         "",
-        "• строка <b>не</b> в пуле → добавлю",
-        "• уже есть → удалю",
-        "Можно несколько строк — режим не сбрасывается.",
+        "• ссылки <b>не</b> в пуле → <b>добавлю</b>",
+        "• та же ссылка ещё раз → <b>удалю</b> из пула",
+        "",
+        "Рассылка подхватит без перезапуска (~30 сек).",
+        "Или просто кинь ссылку t.me/.../s/... в бот без кнопок.",
     ]
     reset_state(cb.from_user.id)
     state(cb.from_user.id)["wait"] = "story_toggle"
@@ -324,6 +326,8 @@ async def texts_input(message):
             await message.answer("Пустая строка.")
             return
         added = removed = bad = 0
+        added_labels = []
+        removed_labels = []
         total = len(load_story_refs(config.STORIES_FILE))
         for line in lines:
             action, total, label = toggle_story_line(line)
@@ -332,13 +336,21 @@ async def texts_input(message):
                 continue
             if action == "added":
                 added += 1
+                added_labels.append(label)
             else:
                 removed += 1
-        await message.answer(
-            f"✅ +{added} | 🗑 −{removed} | ⚠️ пропуск {bad}\n"
-            f"В пуле: <b>{total}</b>\n\n"
-            "Ещё строки — или ⬅️ Назад."
-        )
+                removed_labels.append(label)
+        rows = [f"✅ +{added} | 🗑 −{removed} | ⚠️ пропуск {bad}", f"В пуле: <b>{total}</b>"]
+        if added_labels:
+            rows.append("Добавлено:")
+            for lb in added_labels[:10]:
+                rows.append(f"• <code>{esc(lb)}</code>")
+        if removed_labels:
+            rows.append("Удалено:")
+            for lb in removed_labels[:10]:
+                rows.append(f"• <code>{esc(lb)}</code>")
+        rows.append("\nЕщё ссылки — или ⬅️ Назад.")
+        await message.answer("\n".join(rows))
         return
 
     if wait == "href_domain" and text:
