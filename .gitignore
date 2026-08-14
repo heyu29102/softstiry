@@ -1,0 +1,12 @@
+.env
+venv/
+__pycache__/
+*.pyc
+
+sessions/
+sessions_bad/
+
+*.log
+*.log.*
+app.pid
+.panel_tmp/

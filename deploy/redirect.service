@@ -1,0 +1,16 @@
+[Unit]
+Description=Bot redirect (random from bots.txt)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/new-soft
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/new-soft/redirect.py
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

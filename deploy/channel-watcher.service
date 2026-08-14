@@ -1,0 +1,16 @@
+[Unit]
+Description=Domain watcher (legacy unit name — runs domain_watcher.py)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/new-soft
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/new-soft/domain_watcher.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
