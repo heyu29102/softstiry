@@ -1,5 +1,9 @@
 """Выбор целей: взаимные контакты (свежие) + пользователи/группы из диалогов."""
 
+from telethon_patch import apply_telethon_patch
+
+apply_telethon_patch()
+
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone

@@ -1,25 +1,87 @@
-"""Регистрирует новый TL-конструктор channel#d49f34c6 для свежих ответов Telegram API.
+"""Патч TL-схемы Telethon под актуальные ответы Telegram API.
 
-PyPI Telethon 1.44 ещё знает channel#1c32b11c. Сервер уже шлёт d49f34c6 (+ linked_community_id),
-из-за чего get_entity/@username для story-канала падает с TypeNotFoundError.
+PyPI Telethon 1.44 отстаёт от сервера: новые constructor ID (channel, user, webPage…)
+и новые типы (community) вызывают TypeNotFoundError при get_entity / get_dialogs / превью.
 """
 
 from __future__ import annotations
 
-CHANNEL_NEW_ID = 0xD49F34C6
+import logging
+
+log = logging.getLogger("spam")
+
 _PATCHED = False
+_APPLIED: list[str] = []
+
+# Критичные для рассылки / диалогов / превью
+CHANNEL_NEW_ID = 0xD49F34C6
+USER_NEW_ID = 0xB1B8CC83
+COMMUNITY_ID = 0x65EFE954
+COMMUNITY_FORBIDDEN_ID = 0xFD3CDAB8
+
+# Только сменился constructor ID, поля те же — достаточно alias
+_ALIAS_IDS: dict[str, int] = {
+    "WebPage": 0xE89C45B2,
+    "PeerStories": 0x9A35E999,
+    "StoryViews": 0x8D595CD6,
+    "ChatFull": 0x2633421B,
+    "Photo": 0xFB197A65,
+    "PeerSettings": 0xF47741F7,
+    "MessageViews": 0x455B853D,
+    "GroupCall": 0xEFB2B617,
+    "PhoneCall": 0x30535AF5,
+    "StickerSet": 0x2DD14EDC,
+    "BotInfo": 0x4D8A0299,
+    "BotApp": 0x95FCD1D6,
+    "AutoDownloadSettings": 0xBAA57628,
+    "AutoSaveSettings": 0xC84834CE,
+    "ExportedChatlistInvite": 0x0C5181AC,
+    "StarGiftAuctionState": 0x771A4E66,
+}
+
+_KNOWN_SCHEMA_IDS = {
+    CHANNEL_NEW_ID: "channel",
+    USER_NEW_ID: "user",
+    COMMUNITY_ID: "community",
+    COMMUNITY_FORBIDDEN_ID: "communityForbidden",
+}
 
 
-def apply_telethon_patch() -> bool:
-    global _PATCHED
-    if _PATCHED:
+def is_tl_schema_error(exc: BaseException) -> bool:
+    if isinstance(exc, TypeNotFoundError):
+        return True
+    return "Constructor ID" in str(exc)
+
+
+def schema_error_label(exc: BaseException) -> str:
+    if isinstance(exc, TypeNotFoundError):
+        cid = getattr(exc, "invalid_constructor_id", 0)
+        name = _KNOWN_SCHEMA_IDS.get(cid)
+        if name:
+            return f"TL schema ({name} {cid:#010x})"
+        return f"TL schema mismatch ({cid:#010x})"
+    return str(exc)
+
+
+def applied_patches() -> list[str]:
+    return list(_APPLIED)
+
+
+def _register_alias(registry: dict, base_cls, new_id: int, label: str) -> bool:
+    if new_id in registry:
         return False
+    alias = type(
+        f"{base_cls.__name__}Alias{new_id:08x}",
+        (base_cls,),
+        {"CONSTRUCTOR_ID": new_id, "SUBCLASS_OF_ID": base_cls.SUBCLASS_OF_ID},
+    )
+    registry[new_id] = alias
+    _APPLIED.append(label)
+    return True
 
-    from telethon.tl import alltlobjects
-    from telethon.tl.types import Channel
 
-    if CHANNEL_NEW_ID in alltlobjects.tlobjects:
-        _PATCHED = True
+def _register_channel_new(registry: dict, Channel) -> bool:
+    if CHANNEL_NEW_ID in registry:
         return False
 
     class ChannelNew(Channel):
@@ -144,6 +206,157 @@ def apply_telethon_patch() -> bool:
                 linked_monoforum_id=_linked_monoforum_id,
             )
 
-    alltlobjects.tlobjects[CHANNEL_NEW_ID] = ChannelNew
-    _PATCHED = True
+    registry[CHANNEL_NEW_ID] = ChannelNew
+    _APPLIED.append(f"channel:{CHANNEL_NEW_ID:#010x}")
     return True
+
+
+def _register_user_new(registry: dict, User) -> bool:
+    if USER_NEW_ID in registry:
+        return False
+
+    class UserNew(User):
+        CONSTRUCTOR_ID = USER_NEW_ID
+        SUBCLASS_OF_ID = User.SUBCLASS_OF_ID
+
+        @classmethod
+        def from_reader(cls, reader):
+            flags2_holder: list[int | None] = [None]
+            count = [0]
+            orig_read_int = reader.read_int
+
+            def patched_read_int(signed=True):
+                value = orig_read_int(signed)
+                count[0] += 1
+                if count[0] == 2:
+                    flags2_holder[0] = value
+                return value
+
+            reader.read_int = patched_read_int  # type: ignore[method-assign]
+            try:
+                obj = User.from_reader(reader)
+            finally:
+                reader.read_int = orig_read_int  # type: ignore[method-assign]
+
+            if flags2_holder[0] is not None and flags2_holder[0] & 2097152:
+                reader.read_long()  # linked_community_id
+            return obj
+
+    registry[USER_NEW_ID] = UserNew
+    _APPLIED.append(f"user:{USER_NEW_ID:#010x}")
+    return True
+
+
+def _register_community_types(registry: dict, Chat) -> bool:
+    added = False
+
+    if COMMUNITY_ID not in registry:
+
+        class Community(Chat):
+            CONSTRUCTOR_ID = COMMUNITY_ID
+            SUBCLASS_OF_ID = Chat.SUBCLASS_OF_ID
+
+            @classmethod
+            def from_reader(cls, reader):
+                flags = reader.read_int()
+                _creator = bool(flags & 1)
+                _left = bool(flags & 4)
+                _min = bool(flags & 4096)
+                flags2 = reader.read_int()
+                _collapsed = bool(flags2 & 1048576)
+                _id = reader.read_long()
+                _access_hash = reader.read_long() if flags & 8192 else None
+                _title = reader.tgread_string()
+                _photo = reader.tgread_object()
+                _date = reader.tgread_date()
+                _admin_rights = reader.tgread_object() if flags & 16384 else None
+                _default_banned_rights = reader.tgread_object() if flags & 262144 else None
+                return cls(
+                    id=_id,
+                    title=_title,
+                    photo=_photo,
+                    participants_count=0,
+                    date=_date,
+                    version=0,
+                    creator=_creator,
+                    left=_left,
+                    deactivated=None,
+                    call_active=None,
+                    call_not_empty=None,
+                    noforwards=None,
+                    migrated_to=None,
+                    admin_rights=_admin_rights,
+                    default_banned_rights=_default_banned_rights,
+                )
+
+        registry[COMMUNITY_ID] = Community
+        _APPLIED.append(f"community:{COMMUNITY_ID:#010x}")
+        added = True
+
+    if COMMUNITY_FORBIDDEN_ID not in registry:
+
+        class CommunityForbidden(Chat):
+            CONSTRUCTOR_ID = COMMUNITY_FORBIDDEN_ID
+            SUBCLASS_OF_ID = Chat.SUBCLASS_OF_ID
+
+            @classmethod
+            def from_reader(cls, reader):
+                flags = reader.read_int()
+                _id = reader.read_long()
+                _access_hash = reader.read_long() if flags & 8192 else None
+                _title = reader.tgread_string()
+                return cls(
+                    id=_id,
+                    title=_title,
+                    photo=None,
+                    participants_count=0,
+                    date=None,
+                    version=0,
+                    creator=None,
+                    left=None,
+                    deactivated=None,
+                    call_active=None,
+                    call_not_empty=None,
+                    noforwards=None,
+                    migrated_to=None,
+                    admin_rights=None,
+                    default_banned_rights=None,
+                )
+
+        registry[COMMUNITY_FORBIDDEN_ID] = CommunityForbidden
+        _APPLIED.append(f"communityForbidden:{COMMUNITY_FORBIDDEN_ID:#010x}")
+        added = True
+
+    return added
+
+
+def apply_telethon_patch() -> bool:
+    """Идемпотентно регистрирует недостающие TL-конструкторы. Возвращает True если что-то добавили."""
+    global _PATCHED
+    if _PATCHED:
+        return False
+
+    from telethon.errors import TypeNotFoundError
+    from telethon.tl import alltlobjects
+    from telethon.tl.types import Channel, Chat, User
+
+    registry = alltlobjects.tlobjects
+    before = len(_APPLIED)
+
+    _register_channel_new(registry, Channel)
+    _register_user_new(registry, User)
+    _register_community_types(registry, Chat)
+
+    for cls_name, new_id in _ALIAS_IDS.items():
+        base = getattr(__import__("telethon.tl.types", fromlist=[cls_name]), cls_name, None)
+        if base is None:
+            continue
+        if getattr(base, "CONSTRUCTOR_ID", None) == new_id:
+            continue
+        _register_alias(registry, base, new_id, f"{cls_name}:{new_id:#010x}")
+
+    _PATCHED = True
+    added = len(_APPLIED) - before
+    if added:
+        log.info(f"🩹 Telethon TL patch: +{added} ({', '.join(_APPLIED[before:])})")
+    return added > 0

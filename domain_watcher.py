@@ -321,6 +321,9 @@ async def telethon_preview_check(link):
         return None
 
     try:
+        from telethon_patch import apply_telethon_patch
+
+        apply_telethon_patch()
         from opentele.api import API
         from opentele.tl import TelegramClient
         from telethon.errors import RPCError

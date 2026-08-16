@@ -13,6 +13,10 @@ from typing import List, Optional, Tuple
 import colorama
 from colorama import Fore, Style
 
+from telethon_patch import apply_telethon_patch
+
+apply_telethon_patch()
+
 from telethon import TelegramClient
 from telethon.errors import (
     AuthKeyDuplicatedError,

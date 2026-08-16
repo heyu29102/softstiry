@@ -32,7 +32,7 @@ from telethon.tl import functions
 from telethon.tl.types import InputMediaStory
 
 import config
-from telethon_patch import apply_telethon_patch
+from telethon_patch import apply_telethon_patch, is_tl_schema_error, schema_error_label
 from proxies import ProxyPool
 from story_refs import StoryRef, load_story_refs
 from target_select import collect_targets
@@ -87,10 +87,7 @@ def humanize(e):
     if isinstance(e, (UsernameInvalidError, UsernameNotOccupiedError)):
         return "битый username story-канала"
     if isinstance(e, TypeNotFoundError):
-        cid = getattr(e, "invalid_constructor_id", 0)
-        if cid == 0xD49F34C6:
-            return "устаревший TL schema (channel) — нужен патч Telethon"
-        return f"TL schema mismatch ({cid:#010x})"
+        return schema_error_label(e)
     msg = (getattr(e, "message", "") or str(e) or "").upper()
     if "STORY_ID_INVALID" in msg:
         return "история истекла/невалидна"
@@ -541,9 +538,10 @@ class Spammer:
                     errors += 1
                     await asyncio.sleep(jitter(5, 0.2, rng, 1.0))
                 except Exception as ex:
-                    if isinstance(ex, TypeNotFoundError) or "Constructor ID" in str(ex):
-                        log.warning(f"{sid} | ⚠ story {story.url}: {humanize(ex) if isinstance(ex, TypeNotFoundError) else ex}")
+                    if is_tl_schema_error(ex):
+                        log.warning(f"{sid} | ⚠ story {story.url}: {schema_error_label(ex)}")
                         story_cache.pop(story.peer.lower(), None)
+                        apply_telethon_patch()
                         await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
                         continue
                     log.exception(f"{sid} | ✖ {target.label}: {ex}")
