@@ -326,8 +326,9 @@ class Spammer:
 
     async def _resolve_peer_from_dialogs(self, client, username: str):
         uname = username.lstrip("@").lower()
+        limit = min(config.DIALOGS_LIMIT, 200) if config.DIALOGS_LIMIT > 0 else 200
         try:
-            async for dialog in client.iter_dialogs(limit=None):
+            async for dialog in client.iter_dialogs(limit=limit):
                 entity = dialog.entity
                 ent_user = getattr(entity, "username", None)
                 if ent_user and ent_user.lower() == uname:
@@ -396,7 +397,8 @@ class Spammer:
                 return "retry"
             try:
                 me = await client.get_me()
-                log.info(f"{sid} | 🟢 {getattr(me, 'first_name', '?')} ({getattr(me, 'id', '?')})")
+                if config.LOG_SESSION_EVENTS:
+                    log.info(f"{sid} | 🟢 {getattr(me, 'first_name', '?')} ({getattr(me, 'id', '?')})")
             except Exception as e:
                 log.warning(f"{sid} | ❌ get_me: {e}")
                 return "retry"
@@ -421,7 +423,8 @@ class Spammer:
                     return "retry"
                 log.warning(f"{sid} | ⚠️ нет целей (контакты/группы)")
                 return "drop"
-            log.info(f"{sid} | 🎯 целей: {users_n} ЛС + {groups_n} групп")
+            if config.LOG_SESSION_EVENTS:
+                log.info(f"{sid} | 🎯 целей: {users_n} ЛС + {groups_n} групп")
             return await self.send_loop(client, sid, path, targets, rng)
         except asyncio.CancelledError:
             raise
@@ -441,7 +444,20 @@ class Spammer:
                 except Exception:
                     pass
                 delete_session_files(path)
-            log.info(f"{sid} | ⏹ завершена ({int(time.time() - start)}с)")
+            if config.LOG_SESSION_EVENTS:
+                log.info(f"{sid} | ⏹ завершена ({int(time.time() - start)}с)")
+
+    def _error_pause(self, rng, mult: float = 1.0):
+        d = config.ERROR_DELAY * mult
+        return jitter(d, 0.15, rng) if d > 0 else 0
+
+    def _message_pause(self, rng):
+        d = config.DELAY_MESSAGES
+        return jitter(d, 0.15, rng) if d > 0 else 0
+
+    def _cycle_pause(self, rng):
+        d = config.DELAY_CYCLES
+        return jitter(d, 0.1, rng) if d > 0 else 0
 
     async def send_loop(self, client, sid, path, targets, rng):
         stint = rng.randint(int(config.REFRESH_INTERVAL * 0.9), int(config.REFRESH_INTERVAL * 1.1))
@@ -457,11 +473,15 @@ class Spammer:
         while True:
             if target_idx >= total:
                 target_idx = 0
-                log.info(f"{sid} | 🔁 круг готов, отправлено {sent_local}")
-                await asyncio.sleep(jitter(config.DELAY_CYCLES, 0.0, rng, 5.0))
+                if config.LOG_SESSION_EVENTS:
+                    log.info(f"{sid} | 🔁 круг готов, отправлено {sent_local}")
+                pause = self._cycle_pause(rng)
+                if pause > 0:
+                    await asyncio.sleep(pause)
 
             if time.time() - start >= stint:
-                log.info(f"{sid} | ♻️ смена слота (~{stint}с), отправлено {sent_local}")
+                if config.LOG_SESSION_EVENTS:
+                    log.info(f"{sid} | ♻️ смена слота (~{stint}с), отправлено {sent_local}")
                 return "rotate"
 
             target = targets[target_idx]
@@ -489,7 +509,7 @@ class Spammer:
                     sent_local += 1
                     errors = bad_peers = 0
                     every = config.LOG_SUCCESS_EVERY
-                    if every <= 0 or sent_local % every == 0 or target.kind == "group":
+                    if every == 0 or (every > 0 and sent_local % every == 0):
                         log.info(
                             f"{sid} | ✅ story → {kind_tag} {target.label} "
                             f"({target_idx}/{total}) | {story.url} | всего: {n}"
@@ -508,13 +528,17 @@ class Spammer:
                 except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError, TypeNotFoundError) as ue:
                     log.warning(f"{sid} | ⚠ story {story.url}: {humanize(ue)}")
                     story_cache.pop(story.peer.lower(), None)
-                    await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
+                    pause = self._error_pause(rng)
+                    if pause > 0:
+                        await asyncio.sleep(pause)
                     continue
                 except (ChatWriteForbiddenError, UserBannedInChannelError, ChatAdminRequiredError) as ue:
                     log.warning(f"{sid} | ⚠ {target.label}: {humanize(ue)}")
                     if target_id is not None:
                         dead_targets.add(target_id)
-                    await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
+                    pause = self._error_pause(rng)
+                    if pause > 0:
+                        await asyncio.sleep(pause)
                     continue
                 except PeerIdInvalidError as ue:
                     log.warning(f"{sid} | ⚠ {target.label}: {humanize(ue)}")
@@ -534,22 +558,30 @@ class Spammer:
                         target_idx = 0
                         bad_peers = 0
                         dead_targets.clear()
-                    await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
+                    pause = self._error_pause(rng)
+                    if pause > 0:
+                        await asyncio.sleep(pause)
                     continue
                 except PeerFloodError as te:
                     log.error(f"{sid} | ✖ {target.label}: {humanize(te)}")
                     errors += 1
-                    await asyncio.sleep(jitter(5, 0.2, rng, 1.0))
+                    pause = self._error_pause(rng, 3.0)
+                    if pause > 0:
+                        await asyncio.sleep(pause)
                 except RPCError as te:
                     msg = humanize(te)
                     if "STORY_ID_INVALID" in msg.upper():
                         self.mark_story_bad(story, "история истекла", ttl=300)
                         log.warning(f"{sid} | ⚠ story {story.url}: {msg}")
-                        await asyncio.sleep(jitter(2, 0.2, rng, 0.5))
+                        pause = self._error_pause(rng, 2.0)
+                        if pause > 0:
+                            await asyncio.sleep(pause)
                         continue
                     log.error(f"{sid} | ✖ {target.label}: {msg}")
                     errors += 1
-                    await asyncio.sleep(jitter(5, 0.2, rng, 1.0))
+                    pause = self._error_pause(rng, 3.0)
+                    if pause > 0:
+                        await asyncio.sleep(pause)
                 except ConnectionError as ex:
                     log.warning(f"{sid} | ⚠ отключение: {ex}")
                     return "retry"
@@ -558,16 +590,22 @@ class Spammer:
                         log.warning(f"{sid} | ⚠ story {story.url}: {schema_error_label(ex)}")
                         story_cache.pop(story.peer.lower(), None)
                         apply_telethon_patch()
-                        await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
+                        pause = self._error_pause(rng)
+                        if pause > 0:
+                            await asyncio.sleep(pause)
                         continue
                     log.exception(f"{sid} | ✖ {target.label}: {ex}")
                     errors += 1
-                    await asyncio.sleep(jitter(3, 0.2, rng, 0.5))
+                    pause = self._error_pause(rng, 2.0)
+                    if pause > 0:
+                        await asyncio.sleep(pause)
 
                 if errors >= config.MAX_ERRORS:
                     log.error(f"{sid} | 🚨 {errors} ошибок подряд — стоп")
                     return "retry"
-                await asyncio.sleep(jitter(config.DELAY_MESSAGES, 0.3, rng, 1.0))
+                pause = self._message_pause(rng)
+                if pause > 0:
+                    await asyncio.sleep(pause)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -575,7 +613,9 @@ class Spammer:
                 errors += 1
                 if errors >= config.MAX_ERRORS:
                     return "retry"
-                await asyncio.sleep(jitter(2, 0.2, rng, 0.5))
+                pause = self._error_pause(rng, 2.0)
+                if pause > 0:
+                    await asyncio.sleep(pause)
 
     async def worker(self, path):
         try:
@@ -601,10 +641,11 @@ class Spammer:
             path = await self.next_path()
             if self.stop.is_set():
                 return
-            while not self.proxies.has_free():
-                if self.stop.is_set():
-                    return
-                await asyncio.sleep(5)
+            if config.DISPATCHER_PROXY_WAIT:
+                while not self.proxies.has_free():
+                    if self.stop.is_set():
+                        return
+                    await asyncio.sleep(1)
             await self.slots.acquire()
             if self.stop.is_set():
                 self.slots.release()
@@ -631,8 +672,9 @@ class Spammer:
             asyncio.create_task(self.reload_stories_loop()),
         ]
         log.info(
-            f"💬 Старт (stories). Лимит сессий: {config.MAX_SESSIONS}, "
-            f"параллельно: {config.MAX_CONCURRENT}, историй: {len(self.stories)}"
+            f"💬 Старт TURBO (stories). Лимит: {config.MAX_SESSIONS}, "
+            f"параллельно: {config.MAX_CONCURRENT}, delay: {config.DELAY_MESSAGES}s, "
+            f"историй: {len(self.stories)}"
         )
         try:
             await self.stop.wait()
