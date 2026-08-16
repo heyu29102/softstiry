@@ -24,6 +24,8 @@ from telethon.errors import (
     RPCError,
     SlowModeWaitError,
     UserBannedInChannelError,
+    UsernameInvalidError,
+    UsernameNotOccupiedError,
 )
 from telethon.tl import functions
 from telethon.tl.types import InputMediaStory
@@ -79,6 +81,8 @@ def humanize(e):
         return "PeerFlood"
     if isinstance(e, ChannelInvalidError):
         return "битый канал/story peer"
+    if isinstance(e, (UsernameInvalidError, UsernameNotOccupiedError)):
+        return "битый username story-канала"
     msg = (getattr(e, "message", "") or str(e) or "").upper()
     if "STORY_ID_INVALID" in msg:
         return "история истекла/невалидна"
@@ -124,6 +128,7 @@ class Spammer:
         self.tasks = set()
         self.stop = asyncio.Event()
         self.flood_rest = {}
+        self.bad_stories: dict[tuple[str, int], tuple[str, float]] = {}
 
     def push_front(self, path):
         self.pending.appendleft(path)
@@ -162,10 +167,30 @@ class Spammer:
     def load_stories(self):
         self.stories = load_story_refs(config.STORIES_FILE)
 
+    def story_key(self, story: StoryRef) -> tuple[str, int]:
+        return (story.peer.lower(), story.story_id)
+
+    def is_story_bad(self, story: StoryRef) -> bool:
+        key = self.story_key(story)
+        item = self.bad_stories.get(key)
+        if not item:
+            return False
+        reason, until = item
+        if until <= time.time():
+            self.bad_stories.pop(key, None)
+            return False
+        return True
+
+    def mark_story_bad(self, story: StoryRef, reason: str, ttl: int | None = None):
+        ttl = config.STORY_BAD_TTL if ttl is None else ttl
+        self.bad_stories[self.story_key(story)] = (reason, time.time() + ttl)
+        log.warning(f"📖 story помечена битой: {story.url} ({reason}, пауза {ttl}с)")
+
     def pick_story(self, rng: random.Random) -> StoryRef | None:
-        if not self.stories:
+        pool = [s for s in self.stories if not self.is_story_bad(s)]
+        if not pool:
             return None
-        return rng.choice(self.stories)
+        return rng.choice(pool)
 
     def load(self):
         self.proxies = ProxyPool.from_file()
@@ -216,6 +241,7 @@ class Spammer:
                 "proxies_total": len(self.proxies),
                 "proxies_in_cooldown": self.proxies.cooldown_count(),
                 "stories_in_pool": len(self.stories),
+                "stories_bad": sum(1 for _, (_, until) in self.bad_stories.items() if until > now),
                 "mailing_mode": "stories",
             }
             try:
@@ -247,6 +273,10 @@ class Spammer:
                 stories = await asyncio.to_thread(load_story_refs, config.STORIES_FILE)
                 if stories:
                     self.stories = stories
+                    self.bad_stories = {
+                        k: v for k, v in self.bad_stories.items()
+                        if k in {(s.peer.lower(), s.story_id) for s in stories}
+                    }
             except Exception:
                 pass
 
@@ -287,13 +317,20 @@ class Spammer:
         cached = story_cache.get(key)
         if cached is not None:
             return cached
-        entity = await client.get_entity(story.peer)
-        peer = await client.get_input_entity(entity)
+        peer = await client.get_input_entity(story.peer)
         story_cache[key] = peer
         return peer
 
     async def send_story(self, client, target_entity, story: StoryRef, story_cache: dict):
-        story_peer = await self.resolve_story_peer(client, story, story_cache)
+        try:
+            story_peer = await self.resolve_story_peer(client, story, story_cache)
+        except (UsernameInvalidError, UsernameNotOccupiedError) as exc:
+            self.mark_story_bad(story, humanize(exc), ttl=3600)
+            raise
+        except ChannelInvalidError as exc:
+            self.mark_story_bad(story, humanize(exc), ttl=3600)
+            story_cache.pop(story.peer.lower(), None)
+            raise
         media = InputMediaStory(peer=story_peer, id=story.story_id)
         await client.send_file(target_entity, file=media)
 
@@ -331,13 +368,26 @@ class Spammer:
                 log.warning(f"{sid} | ❌ get_me: {e}")
                 return "retry"
 
-            targets = await collect_targets(client, rng, config.CONTACT_MAX_OFFLINE_DAYS)
-            users_n = sum(1 for t in targets if t.kind == "user")
-            groups_n = sum(1 for t in targets if t.kind == "group")
+            collected = await collect_targets(
+                client,
+                rng,
+                config.CONTACT_MAX_OFFLINE_DAYS,
+                include_dialogs=config.CONTACT_INCLUDE_DIALOGS,
+            )
+            targets = collected.targets
+            users_n = collected.users
+            groups_n = collected.groups
             if not targets:
+                if collected.contacts_error or collected.dialogs_error:
+                    log.warning(
+                        f"{sid} | ⚠️ не удалось собрать цели "
+                        f"(contacts: {collected.contacts_error or 'ok'}, "
+                        f"dialogs: {collected.dialogs_error or 'ok'})"
+                    )
+                    return "retry"
                 log.warning(f"{sid} | ⚠️ нет целей (контакты/группы)")
                 return "drop"
-            log.info(f"{sid} | 🎯 целей: {users_n} взаимных контактов + {groups_n} групп (круги)")
+            log.info(f"{sid} | 🎯 целей: {users_n} ЛС + {groups_n} групп")
             return await self.send_loop(client, sid, path, targets, rng)
         except asyncio.CancelledError:
             raise
@@ -368,6 +418,7 @@ class Spammer:
         target_idx = 0
         total = len(targets)
         story_cache: dict[str, object] = {}
+        dead_targets: set[int] = set()
 
         while True:
             if target_idx >= total:
@@ -381,13 +432,20 @@ class Spammer:
 
             target = targets[target_idx]
             target_idx += 1
+            target_id = getattr(target.entity, "id", None)
+            if target_id is not None and target_id in dead_targets:
+                continue
+
             kind_tag = "ЛС" if target.kind == "user" else "группа"
-            pos = f"{target_idx}/{total}"
 
             try:
                 story = self.pick_story(rng)
                 if story is None:
-                    log.error(f"{sid} | ❌ пул историй пуст")
+                    alive = len(self.stories) - sum(1 for s in self.stories if self.is_story_bad(s))
+                    log.error(
+                        f"{sid} | ❌ нет рабочих историй "
+                        f"(в пуле {len(self.stories)}, живых {alive}) — обнови stories.txt"
+                    )
                     return "retry"
 
                 try:
@@ -398,7 +456,7 @@ class Spammer:
                     errors = bad_peers = 0
                     log.info(
                         f"{sid} | ✅ story → {kind_tag} {target.label} "
-                        f"({target_idx}/{total}) | {story.label} | всего: {n}"
+                        f"({target_idx}/{total}) | {story.url} | всего: {n}"
                     )
                 except FloodWaitError as fw:
                     secs = getattr(fw, "seconds", 0) or 10
@@ -411,23 +469,34 @@ class Spammer:
                     log.warning(f"{sid} | ⏳ FloodWait {secs}с, пауза ~{int(w)}с")
                     await asyncio.sleep(w)
                     continue
-                except (ChatWriteForbiddenError, UserBannedInChannelError, ChatAdminRequiredError) as ue:
-                    log.warning(f"{sid} | ⚠ {target.label}: {humanize(ue)}")
+                except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError) as ue:
+                    log.warning(f"{sid} | ⚠ story {story.url}: {humanize(ue)}")
+                    story_cache.pop(story.peer.lower(), None)
                     await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
                     continue
-                except ChannelInvalidError as ue:
+                except (ChatWriteForbiddenError, UserBannedInChannelError, ChatAdminRequiredError) as ue:
                     log.warning(f"{sid} | ⚠ {target.label}: {humanize(ue)}")
-                    story_cache.pop(story.peer.lower(), None)
+                    if target_id is not None:
+                        dead_targets.add(target_id)
                     await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
                     continue
                 except PeerIdInvalidError as ue:
                     log.warning(f"{sid} | ⚠ {target.label}: {humanize(ue)}")
+                    if target_id is not None:
+                        dead_targets.add(target_id)
                     bad_peers += 1
                     if bad_peers >= 20:
-                        targets[:] = await collect_targets(client, rng, config.CONTACT_MAX_OFFLINE_DAYS)
+                        collected = await collect_targets(
+                            client,
+                            rng,
+                            config.CONTACT_MAX_OFFLINE_DAYS,
+                            include_dialogs=config.CONTACT_INCLUDE_DIALOGS,
+                        )
+                        targets[:] = collected.targets
                         total = len(targets)
                         target_idx = 0
                         bad_peers = 0
+                        dead_targets.clear()
                     await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
                     continue
                 except PeerFloodError as te:
@@ -436,14 +505,12 @@ class Spammer:
                     await asyncio.sleep(jitter(5, 0.2, rng, 1.0))
                 except RPCError as te:
                     msg = humanize(te)
-                    if isinstance(te, ChannelInvalidError):
-                        log.warning(f"{sid} | ⚠ {target.label}: {msg}")
-                        story_cache.pop(story.peer.lower(), None)
-                        await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
+                    if "STORY_ID_INVALID" in msg.upper():
+                        self.mark_story_bad(story, "история истекла", ttl=300)
+                        log.warning(f"{sid} | ⚠ story {story.url}: {msg}")
+                        await asyncio.sleep(jitter(2, 0.2, rng, 0.5))
                         continue
                     log.error(f"{sid} | ✖ {target.label}: {msg}")
-                    if "STORY_ID_INVALID" in msg.upper():
-                        await asyncio.sleep(jitter(2, 0.2, rng, 0.5))
                     errors += 1
                     await asyncio.sleep(jitter(5, 0.2, rng, 1.0))
                 except Exception as ex:

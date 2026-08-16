@@ -2,7 +2,7 @@ import time
 
 import config
 
-PROXY_COOLDOWN = 120
+PROXY_COOLDOWN = config.PROXY_COOLDOWN
 
 
 def parse_proxy(line):
@@ -59,7 +59,12 @@ class ProxyPool:
         now = time.time()
         free = [p for p in self.proxies if p["bad_until"] <= now]
         if not free:
-            return None
+            # Все в кулдауне — берём с минимальным остатком, иначе 900 сессий простаивают.
+            if not self.proxies:
+                return None
+            p = min(self.proxies, key=lambda x: (x["bad_until"], x["in_use"]))
+            p["in_use"] += 1
+            return p
         p = min(free, key=lambda x: x["in_use"])
         p["in_use"] += 1
         return p

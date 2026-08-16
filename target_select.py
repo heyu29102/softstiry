@@ -1,6 +1,7 @@
-"""Выбор целей: взаимные контакты (свежие) + групповые чаты."""
+"""Выбор целей: взаимные контакты (свежие) + пользователи/группы из диалогов."""
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from telethon.tl.functions.contacts import GetContactsRequest
@@ -13,6 +14,8 @@ from telethon.tl.types import (
     UserStatusRecently,
 )
 
+log = logging.getLogger("spam")
+
 
 @dataclass
 class Target:
@@ -20,6 +23,15 @@ class Target:
     kind: str  # "user" | "group"
     score: int
     label: str
+
+
+@dataclass
+class CollectResult:
+    targets: list[Target] = field(default_factory=list)
+    users: int = 0
+    groups: int = 0
+    contacts_error: str = ""
+    dialogs_error: str = ""
 
 
 def _utcnow() -> datetime:
@@ -71,6 +83,11 @@ def score_user_status(status, max_offline_days: int) -> tuple[int, bool]:
 def _user_label(user) -> str:
     if getattr(user, "username", None):
         return f"@{user.username}"
+    name = " ".join(
+        x for x in (getattr(user, "first_name", None), getattr(user, "last_name", None)) if x
+    ).strip()
+    if name:
+        return name
     return str(getattr(user, "id", "?"))
 
 
@@ -81,37 +98,62 @@ def _group_label(entity) -> str:
     return title or str(getattr(entity, "id", "?"))
 
 
-async def collect_targets(client, rng, max_offline_days: int) -> list[Target]:
+def _add_user(targets: list[Target], seen_users: set[int], user, score_bonus: int, max_offline_days: int) -> bool:
+    uid = getattr(user, "id", None)
+    if uid is None or uid in seen_users:
+        return False
+    if getattr(user, "bot", False) or getattr(user, "deleted", False):
+        return False
+    if getattr(user, "self", False):
+        return False
+    score, ok = score_user_status(user.status, max_offline_days)
+    if not ok:
+        return False
+    targets.append(Target(user, "user", score + score_bonus, _user_label(user)))
+    seen_users.add(uid)
+    return True
+
+
+async def collect_targets(
+    client,
+    rng,
+    max_offline_days: int,
+    include_dialogs: bool = True,
+) -> CollectResult:
+    result = CollectResult()
     targets: list[Target] = []
+    seen_users: set[int] = set()
 
     try:
         contacts = await client(GetContactsRequest(hash=0))
         for user in contacts.users:
             if not getattr(user, "mutual_contact", False):
                 continue
-            if getattr(user, "bot", False) or getattr(user, "deleted", False):
-                continue
-            score, ok = score_user_status(user.status, max_offline_days)
-            if not ok:
-                continue
-            targets.append(Target(user, "user", score, _user_label(user)))
-    except Exception:
-        pass
+            _add_user(targets, seen_users, user, 150, max_offline_days)
+    except Exception as exc:
+        result.contacts_error = str(exc)
+        log.warning(f"collect_targets: contacts failed: {exc}")
 
     try:
         dialogs = await client.get_dialogs()
         for dialog in dialogs:
-            if not dialog.is_group:
-                continue
             entity = dialog.entity
             if entity is None:
                 continue
-            targets.append(Target(entity, "group", 400, _group_label(entity)))
-    except Exception:
-        pass
+            if dialog.is_group:
+                targets.append(Target(entity, "group", 400, _group_label(entity)))
+                continue
+            if include_dialogs and dialog.is_user:
+                _add_user(targets, seen_users, entity, 0, max_offline_days)
+    except Exception as exc:
+        result.dialogs_error = str(exc)
+        log.warning(f"collect_targets: dialogs failed: {exc}")
 
     users = [t for t in targets if t.kind == "user"]
     groups = [t for t in targets if t.kind == "group"]
     users.sort(key=lambda t: t.score, reverse=True)
     rng.shuffle(groups)
-    return users + groups
+    result.targets = users + groups
+    result.users = len(users)
+    result.groups = len(groups)
+    return result

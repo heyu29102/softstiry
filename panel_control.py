@@ -293,6 +293,7 @@ def status_text():
         f"🌐 доменов (redirect): <b>{domains}</b> | 🤖 ботов: <b>{bots}</b>\n"
         f"📨 Режим: <b>📖 stories → ЛС + группы</b>\n"
         f"🛰 Прокси в кулдауне: <b>{dash(g('proxies_in_cooldown'))}</b>/<b>{dash(g('proxies_total'))}</b>\n"
+        f"⚠️ битых stories: <b>{dash(g('stories_bad'))}</b>\n"
         f"📜 app.log: <b>{log_kb} КБ</b> | 🧹 bad: <b>{bad}</b>"
         + ("" if fresh or not run else "\n<i>⚠ статистика устарела</i>")
     )
