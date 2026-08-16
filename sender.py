@@ -193,6 +193,10 @@ class Spammer:
 
     def pick_story(self, rng: random.Random) -> StoryRef | None:
         pool = [s for s in self.stories if not self.is_story_bad(s)]
+        if not pool and self.stories:
+            log.warning(f"♻ все {len(self.stories)} stories в bad — сброс blacklist")
+            self.bad_stories.clear()
+            pool = self.stories[:]
         if not pool:
             return None
         return rng.choice(pool)
@@ -272,16 +276,19 @@ class Spammer:
             )
 
     async def reload_stories_loop(self):
+        last_keys = {self.story_key(s) for s in self.stories}
         while not self.stop.is_set():
             await asyncio.sleep(config.STORIES_RELOAD_INTERVAL)
             try:
                 stories = await asyncio.to_thread(load_story_refs, config.STORIES_FILE)
-                if stories:
-                    self.stories = stories
-                    self.bad_stories = {
-                        k: v for k, v in self.bad_stories.items()
-                        if k in {(s.peer.lower(), s.story_id) for s in stories}
-                    }
+                if not stories:
+                    continue
+                new_keys = {self.story_key(s) for s in stories}
+                if new_keys != last_keys:
+                    self.bad_stories.clear()
+                    log.info(f"📖 stories.txt обновлён: {len(stories)} историй, сброс bad")
+                self.stories = stories
+                last_keys = new_keys
             except Exception:
                 pass
 
@@ -335,18 +342,20 @@ class Spammer:
         if cached is not None:
             return cached
 
-        peer = await self._resolve_peer_from_dialogs(client, story.peer)
-        if peer is None:
+        try:
             peer = await client.get_input_entity(story.peer)
+        except Exception:
+            peer = await self._resolve_peer_from_dialogs(client, story.peer)
+            if peer is None:
+                raise
         story_cache[key] = peer
         return peer
 
     async def send_story(self, client, target_entity, story: StoryRef, story_cache: dict):
         try:
             story_peer = await self.resolve_story_peer(client, story, story_cache)
-        except TypeNotFoundError as exc:
+        except TypeNotFoundError:
             apply_telethon_patch()
-            self.mark_story_bad(story, humanize(exc), ttl=600)
             raise
         except (UsernameInvalidError, UsernameNotOccupiedError) as exc:
             self.mark_story_bad(story, humanize(exc), ttl=3600)
@@ -397,6 +406,7 @@ class Spammer:
                 rng,
                 config.CONTACT_MAX_OFFLINE_DAYS,
                 include_dialogs=config.CONTACT_INCLUDE_DIALOGS,
+                dialogs_limit=config.DIALOGS_LIMIT,
             )
             targets = collected.targets
             users_n = collected.users
@@ -478,10 +488,12 @@ class Spammer:
                     n = self.mark_sent()
                     sent_local += 1
                     errors = bad_peers = 0
-                    log.info(
-                        f"{sid} | ✅ story → {kind_tag} {target.label} "
-                        f"({target_idx}/{total}) | {story.url} | всего: {n}"
-                    )
+                    every = config.LOG_SUCCESS_EVERY
+                    if every <= 0 or sent_local % every == 0 or target.kind == "group":
+                        log.info(
+                            f"{sid} | ✅ story → {kind_tag} {target.label} "
+                            f"({target_idx}/{total}) | {story.url} | всего: {n}"
+                        )
                 except FloodWaitError as fw:
                     secs = getattr(fw, "seconds", 0) or 10
                     self.mark_flood()
@@ -515,6 +527,7 @@ class Spammer:
                             rng,
                             config.CONTACT_MAX_OFFLINE_DAYS,
                             include_dialogs=config.CONTACT_INCLUDE_DIALOGS,
+                            dialogs_limit=config.DIALOGS_LIMIT,
                         )
                         targets[:] = collected.targets
                         total = len(targets)
@@ -578,7 +591,7 @@ class Spammer:
         if result == "rotate":
             self.push_back(path)
         elif result == "retry":
-            rest = self.flood_rest.pop(os.path.basename(path), 30)
+            rest = self.flood_rest.pop(os.path.basename(path), config.WORKER_RETRY_SLEEP)
             await asyncio.sleep(min(rest, 3600))
             if not self.stop.is_set():
                 self.push_back(path)

@@ -123,6 +123,7 @@ async def collect_targets(
     rng,
     max_offline_days: int,
     include_dialogs: bool = True,
+    dialogs_limit: int | None = None,
 ) -> CollectResult:
     result = CollectResult()
     targets: list[Target] = []
@@ -139,7 +140,8 @@ async def collect_targets(
         log.warning(f"collect_targets: contacts failed: {exc}")
 
     try:
-        dialogs = await client.get_dialogs()
+        limit = dialogs_limit if dialogs_limit and dialogs_limit > 0 else None
+        dialogs = await client.get_dialogs(limit=limit)
         for dialog in dialogs:
             entity = dialog.entity
             if entity is None:

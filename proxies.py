@@ -1,7 +1,9 @@
+import logging
 import time
 
 import config
 
+log = logging.getLogger("spam")
 PROXY_COOLDOWN = config.PROXY_COOLDOWN
 
 
@@ -37,25 +39,62 @@ def parse_proxy(line):
         return None
 
 
+def _load_proxies_from_file():
+    proxies = []
+    if config.PROXY_FILE.exists():
+        with config.PROXY_FILE.open("r", encoding="utf-8") as f:
+            for line in f:
+                p = parse_proxy(line)
+                if p:
+                    proxies.append(p)
+    return proxies
+
+
 class ProxyPool:
     def __init__(self, proxies):
         self.proxies = proxies
+        self._mtime = 0.0
+        self._last_reload_check = 0.0
+        self._touch_mtime()
 
     @classmethod
     def from_file(cls):
-        proxies = []
-        if config.PROXY_FILE.exists():
-            with config.PROXY_FILE.open("r", encoding="utf-8") as f:
-                for line in f:
-                    p = parse_proxy(line)
-                    if p:
-                        proxies.append(p)
-        return cls(proxies)
+        return cls(_load_proxies_from_file())
+
+    def _touch_mtime(self):
+        try:
+            self._mtime = config.PROXY_FILE.stat().st_mtime
+        except OSError:
+            self._mtime = 0.0
+
+    def maybe_reload(self):
+        now = time.time()
+        if now - self._last_reload_check < config.PROXY_RELOAD_INTERVAL:
+            return
+        self._last_reload_check = now
+        try:
+            mtime = config.PROXY_FILE.stat().st_mtime
+        except OSError:
+            return
+        if mtime == self._mtime:
+            return
+        fresh = _load_proxies_from_file()
+        old_map = {(p["addr"], p["port"]): p for p in self.proxies}
+        for p in fresh:
+            old = old_map.get((p["addr"], p["port"]))
+            if old:
+                p["bad_until"] = old["bad_until"]
+                p["in_use"] = old["in_use"]
+        old_count = len(self.proxies)
+        self.proxies = fresh
+        self._mtime = mtime
+        log.info(f"🛰 proxy.txt перезагружен: {len(self.proxies)} (было {old_count})")
 
     def __len__(self):
         return len(self.proxies)
 
     def acquire(self):
+        self.maybe_reload()
         now = time.time()
         free = [p for p in self.proxies if p["bad_until"] <= now]
         if not free:
