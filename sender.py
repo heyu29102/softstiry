@@ -23,6 +23,7 @@ from telethon.errors import (
     PeerIdInvalidError,
     RPCError,
     SlowModeWaitError,
+    TypeNotFoundError,
     UserBannedInChannelError,
     UsernameInvalidError,
     UsernameNotOccupiedError,
@@ -31,12 +32,14 @@ from telethon.tl import functions
 from telethon.tl.types import InputMediaStory
 
 import config
+from telethon_patch import apply_telethon_patch
 from proxies import ProxyPool
 from story_refs import StoryRef, load_story_refs
 from target_select import collect_targets
 from textgen import jitter, jitter_up
 
 colorama.init(autoreset=True)
+apply_telethon_patch()
 
 FLOOD_SOFT_LIMIT = 300
 
@@ -83,6 +86,11 @@ def humanize(e):
         return "битый канал/story peer"
     if isinstance(e, (UsernameInvalidError, UsernameNotOccupiedError)):
         return "битый username story-канала"
+    if isinstance(e, TypeNotFoundError):
+        cid = getattr(e, "invalid_constructor_id", 0)
+        if cid == 0xD49F34C6:
+            return "устаревший TL schema (channel) — нужен патч Telethon"
+        return f"TL schema mismatch ({cid:#010x})"
     msg = (getattr(e, "message", "") or str(e) or "").upper()
     if "STORY_ID_INVALID" in msg:
         return "история истекла/невалидна"
@@ -312,18 +320,37 @@ class Spammer:
         self.save_seen()
         log.info(f"📂 Загружено {len(files)} сессий, лимит одновременно: {config.MAX_SESSIONS}")
 
+    async def _resolve_peer_from_dialogs(self, client, username: str):
+        uname = username.lstrip("@").lower()
+        try:
+            async for dialog in client.iter_dialogs(limit=None):
+                entity = dialog.entity
+                ent_user = getattr(entity, "username", None)
+                if ent_user and ent_user.lower() == uname:
+                    return await client.get_input_entity(entity)
+        except Exception:
+            pass
+        return None
+
     async def resolve_story_peer(self, client, story: StoryRef, story_cache: dict):
         key = story.peer.lower()
         cached = story_cache.get(key)
         if cached is not None:
             return cached
-        peer = await client.get_input_entity(story.peer)
+
+        peer = await self._resolve_peer_from_dialogs(client, story.peer)
+        if peer is None:
+            peer = await client.get_input_entity(story.peer)
         story_cache[key] = peer
         return peer
 
     async def send_story(self, client, target_entity, story: StoryRef, story_cache: dict):
         try:
             story_peer = await self.resolve_story_peer(client, story, story_cache)
+        except TypeNotFoundError as exc:
+            apply_telethon_patch()
+            self.mark_story_bad(story, humanize(exc), ttl=600)
+            raise
         except (UsernameInvalidError, UsernameNotOccupiedError) as exc:
             self.mark_story_bad(story, humanize(exc), ttl=3600)
             raise
@@ -469,7 +496,7 @@ class Spammer:
                     log.warning(f"{sid} | ⏳ FloodWait {secs}с, пауза ~{int(w)}с")
                     await asyncio.sleep(w)
                     continue
-                except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError) as ue:
+                except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError, TypeNotFoundError) as ue:
                     log.warning(f"{sid} | ⚠ story {story.url}: {humanize(ue)}")
                     story_cache.pop(story.peer.lower(), None)
                     await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
@@ -514,6 +541,11 @@ class Spammer:
                     errors += 1
                     await asyncio.sleep(jitter(5, 0.2, rng, 1.0))
                 except Exception as ex:
+                    if isinstance(ex, TypeNotFoundError) or "Constructor ID" in str(ex):
+                        log.warning(f"{sid} | ⚠ story {story.url}: {humanize(ex) if isinstance(ex, TypeNotFoundError) else ex}")
+                        story_cache.pop(story.peer.lower(), None)
+                        await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
+                        continue
                     log.exception(f"{sid} | ✖ {target.label}: {ex}")
                     errors += 1
                     await asyncio.sleep(jitter(3, 0.2, rng, 0.5))
