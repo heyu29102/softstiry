@@ -20,13 +20,13 @@ def _story_quick_reply(text):
     labels_add, labels_rm = [], []
     total = len(load_story_refs(config.STORIES_FILE))
     for line in lines:
-        action, total, label = toggle_story_line(line)
+        action, total, url = toggle_story_line(line)
         if action == "added":
             added += 1
-            labels_add.append(label)
+            labels_add.append(url)
         elif action == "removed":
             removed += 1
-            labels_rm.append(label)
+            labels_rm.append(url)
     rows = [
         f"📖 Story из сообщения: +{added} / −{removed}",
         f"В пуле: <b>{total}</b>",

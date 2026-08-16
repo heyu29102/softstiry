@@ -195,44 +195,44 @@ def toggle_story_line(text):
         if (r.peer.lower(), r.story_id) == key:
             refs.pop(i)
             save_story_refs(refs, config.STORIES_FILE)
-            return "removed", len(refs), ref.label
+            return "removed", len(refs), ref.url
     refs.append(ref)
     save_story_refs(refs, config.STORIES_FILE)
-    return "added", len(refs), ref.label
+    return "added", len(refs), ref.url
 
 
-@router.callback_query(F.data == "stories")
-async def cb_stories(cb):
+@router.callback_query(F.data == "href_story")
+async def cb_href_story(cb):
     refs = load_story_refs(config.STORIES_FILE)
-    if not refs:
-        await cb.message.answer("Историй нет. Жми «Добавить / убрать».")
-    else:
-        rows = [f"{i}. <code>{esc(r.label)}</code>" for i, r in enumerate(refs[:30], 1)]
-        if len(refs) > 30:
-            rows.append(f"… и ещё {len(refs) - 30}")
-        await cb.message.answer("📖 stories.txt:\n" + "\n".join(rows))
-    await cb.answer()
 
-
-@router.callback_query(F.data == "story_toggle")
-async def cb_story_toggle(cb):
-    refs = load_story_refs(config.STORIES_FILE)
     rows = [
-        "📖 <b>Добавить story в рассылку</b>",
-        f"В пуле сейчас: <b>{len(refs)}</b>",
-        "",
-        "Пришли ссылку или строку (можно несколько, с новой строки):",
-        "<code>https://t.me/testchanelkk/s/1</code>",
-        "<code>channel|42</code>",
-        "",
-        "• ссылки <b>не</b> в пуле → <b>добавлю</b>",
-        "• та же ссылка ещё раз → <b>удалю</b> из пула",
-        "",
-        "Рассылка подхватит без перезапуска (~30 сек).",
-        "Или просто кинь ссылку t.me/.../s/... в бот без кнопок.",
+        "📖 Пул stories для рассылки",
+        "Файл: <code>stories.txt</code>",
+        f"📚 В пуле: <b>{len(refs)}</b> историй",
     ]
+
+    if refs:
+        for i, ref in enumerate(refs[:10], 1):
+            rows.append(f"{i}. <code>{esc(ref.url)}</code>")
+        if len(refs) > 10:
+            rows.append(f"… и ещё {len(refs) - 10}")
+    else:
+        rows.append("Пул пуст — добавь story.")
+
+    rows.append("")
+    rows.append("Отправь ссылку на story:")
+    rows.append("<code>https://t.me/channel/s/1</code>")
+    rows.append("или <code>channel|1</code>")
+    rows.append("")
+    rows.append("• ссылка <b>не</b> в пуле → <b>добавлю</b>")
+    rows.append("• ссылка уже в пуле → <b>удалю</b>")
+    rows.append("Можно слать несколько строк — режим не сбрасывается.")
+    rows.append("")
+    rows.append("Рассылка подхватит без перезапуска (~30 сек).")
+
     reset_state(cb.from_user.id)
-    state(cb.from_user.id)["wait"] = "story_toggle"
+    state(cb.from_user.id)["wait"] = "href_story"
+
     await cb.message.answer("\n".join(rows), reply_markup=kb_back_texts())
     await cb.answer()
 
@@ -314,41 +314,63 @@ async def cb_href_bot(cb):
     await cb.answer()
 
 
-@router.message(waiting("href_domain", "href_bot", "story_toggle"))
+@router.message(waiting("href_domain", "href_bot", "href_story"))
 async def texts_input(message):
     s = state(message.from_user.id)
     wait = s.get("wait")
     text = (message.text or "").strip()
 
-    if wait == "story_toggle" and text:
+    if wait == "href_story" and text:
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         if not lines:
             await message.answer("Пустая строка.")
             return
+
+        if len(lines) == 1:
+            action, total, url = toggle_story_line(lines[0])
+            if action is None:
+                await message.answer(
+                    "Формат: <code>https://t.me/channel/s/1</code> или <code>channel|1</code>"
+                )
+                return
+            if action == "added":
+                await message.answer(
+                    f"✅ Добавлен в пул:\n<code>{esc(url)}</code>\n"
+                    f"Всего историй: <b>{total}</b>\n\n"
+                    "Ещё строка — или ⬅️ Назад."
+                )
+            else:
+                await message.answer(
+                    f"🗑 Удалён из пула:\n<code>{esc(url)}</code>\n"
+                    f"Всего историй: <b>{total}</b>\n\n"
+                    "Ещё строка — или ⬅️ Назад."
+                )
+            return
+
         added = removed = bad = 0
-        added_labels = []
-        removed_labels = []
+        added_urls = []
+        removed_urls = []
         total = len(load_story_refs(config.STORIES_FILE))
         for line in lines:
-            action, total, label = toggle_story_line(line)
+            action, total, url = toggle_story_line(line)
             if action is None:
                 bad += 1
                 continue
             if action == "added":
                 added += 1
-                added_labels.append(label)
+                added_urls.append(url)
             else:
                 removed += 1
-                removed_labels.append(label)
+                removed_urls.append(url)
         rows = [f"✅ +{added} | 🗑 −{removed} | ⚠️ пропуск {bad}", f"В пуле: <b>{total}</b>"]
-        if added_labels:
+        if added_urls:
             rows.append("Добавлено:")
-            for lb in added_labels[:10]:
-                rows.append(f"• <code>{esc(lb)}</code>")
-        if removed_labels:
+            for url in added_urls[:10]:
+                rows.append(f"• <code>{esc(url)}</code>")
+        if removed_urls:
             rows.append("Удалено:")
-            for lb in removed_labels[:10]:
-                rows.append(f"• <code>{esc(lb)}</code>")
+            for url in removed_urls[:10]:
+                rows.append(f"• <code>{esc(url)}</code>")
         rows.append("\nЕщё ссылки — или ⬅️ Назад.")
         await message.answer("\n".join(rows))
         return
