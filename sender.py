@@ -537,6 +537,9 @@ class Spammer:
                     log.error(f"{sid} | ✖ {target.label}: {msg}")
                     errors += 1
                     await asyncio.sleep(jitter(5, 0.2, rng, 1.0))
+                except ConnectionError as ex:
+                    log.warning(f"{sid} | ⚠ отключение: {ex}")
+                    return "retry"
                 except Exception as ex:
                     if is_tl_schema_error(ex):
                         log.warning(f"{sid} | ⚠ story {story.url}: {schema_error_label(ex)}")

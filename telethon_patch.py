@@ -8,6 +8,12 @@ from __future__ import annotations
 
 import logging
 
+try:
+    from telethon.errors import TypeNotFoundError
+except ImportError:  # pragma: no cover
+    class TypeNotFoundError(Exception):
+        invalid_constructor_id = 0
+
 log = logging.getLogger("spam")
 
 _PATCHED = False
