@@ -29,8 +29,7 @@ def kb_sessions():
 
 def kb_texts():
     k = InlineKeyboardBuilder()
-    k.button(text="📜 Список stories", callback_data="stories")
-    k.button(text="➕ Добавить story (ссылка)", callback_data="story_toggle")
+    k.button(text="📖 Story в пул / убрать", callback_data="href_story")
     k.button(text="🌐 Домен в пул / убрать", callback_data="href_domain")
     k.button(text="🤖 Бот в пул / убрать", callback_data="href_bot")
     k.button(text="⬅️ Назад", callback_data="nav:main")

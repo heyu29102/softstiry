@@ -19,6 +19,10 @@ class StoryRef:
     def label(self) -> str:
         return f"{self.peer}/s/{self.story_id}"
 
+    @property
+    def url(self) -> str:
+        return f"https://t.me/{self.peer}/s/{self.story_id}"
+
 
 def parse_story_line(line: str) -> StoryRef | None:
     line = (line or "").strip()
