@@ -451,6 +451,31 @@ class Spammer:
             raise last_exc
         raise UsernameNotOccupiedError(request=None)
 
+    async def warm_story_peers(self, client, sid: str, story_cache: dict, session_skip_stories: set):
+        """Перед рассылкой: каждый аккаунт резолвит все stories и вступает в каналы."""
+        if not config.STORY_WARM_ON_START:
+            return
+        pool = [s for s in self.stories if not self.is_story_bad(s)]
+        if not pool:
+            return
+        ok = 0
+        for story in pool:
+            key = self.story_key(story)
+            if key in session_skip_stories or story.peer.lower() in story_cache:
+                ok += 1
+                continue
+            try:
+                await self.resolve_story_peer(client, story, story_cache)
+                ok += 1
+            except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError) as exc:
+                session_skip_stories.add(key)
+                log.warning(f"{sid} | 📖 warm: {story.url} недоступна ({humanize(exc)})")
+            except Exception as exc:
+                log.warning(f"{sid} | 📖 warm: {story.url} позже ({humanize(exc)})")
+            await asyncio.sleep(config.STORY_RESOLVE_DELAY)
+        if config.LOG_SESSION_EVENTS or ok < len(pool):
+            log.info(f"{sid} | 📖 warm stories: {ok}/{len(pool)} готовы к рассылке")
+
     async def send_story(self, client, target_entity, story: StoryRef, story_cache: dict):
         try:
             story_peer = await self.resolve_story_peer(client, story, story_cache)
