@@ -33,7 +33,9 @@ from telethon.errors import (
 from telethon.tl import functions
 from telethon.tl.functions.contacts import ResolveUsernameRequest
 from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.messages import SendMediaRequest
 from telethon.tl.types import InputMediaStory
+from telethon import helpers
 
 import config
 from telethon_patch import apply_telethon_patch, is_tl_schema_error, schema_error_label
@@ -568,7 +570,15 @@ class Spammer:
                 raise
             try:
                 media = InputMediaStory(peer=story_peer, id=story.story_id)
-                await client.send_file(target_entity, file=media)
+                target_peer = await client.get_input_entity(target_entity)
+                await client(
+                    SendMediaRequest(
+                        peer=target_peer,
+                        media=media,
+                        message="",
+                        random_id=helpers.generate_random_long(),
+                    )
+                )
                 return
             except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError) as exc:
                 last_exc = exc
