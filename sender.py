@@ -225,9 +225,18 @@ class Spammer:
         self.bad_stories[self.story_key(story)] = (reason, time.time() + ttl)
         log.warning(f"📖 story истекла: {story.url} ({reason}, пауза {ttl}с)")
 
-    def pick_story(self, rng: random.Random, skip: set | None = None) -> StoryRef | None:
-        skip = skip or set()
-        pool = [s for s in self.stories if self.story_key(s) not in skip and not self.is_story_bad(s)]
+    def pick_story(
+        self,
+        rng: random.Random,
+        fail_counts: dict[tuple[str, int], int] | None = None,
+    ) -> StoryRef | None:
+        fail_counts = fail_counts or {}
+        limit = config.STORY_SKIP_AFTER
+        pool = [
+            s
+            for s in self.stories
+            if fail_counts.get(self.story_key(s), 0) < limit and not self.is_story_bad(s)
+        ]
         if not pool and self.stories:
             pool = [s for s in self.stories if not self.is_story_bad(s)]
         if not pool:
@@ -357,6 +366,19 @@ class Spammer:
         self.save_seen()
         log.info(f"📂 Загружено {len(files)} сессий, лимит одновременно: {config.MAX_SESSIONS}")
 
+    async def _ensure_joined(self, client, username: str, joined_keys: set[str]):
+        if not config.STORY_JOIN_CHANNEL:
+            return
+        key = username.lstrip("@").lower()
+        if key in joined_keys:
+            return
+        try:
+            entity = await client.get_entity(username.lstrip("@"))
+            await client(JoinChannelRequest(entity))
+            joined_keys.add(key)
+        except Exception:
+            pass
+
     async def _resolve_peer_from_dialogs(self, client, username: str):
         uname = username.lstrip("@").lower()
         limit = min(config.DIALOGS_LIMIT, 200) if config.DIALOGS_LIMIT > 0 else 200
@@ -375,11 +397,6 @@ class Spammer:
         if not uname:
             return None
         entity = await client.get_entity(uname)
-        if config.STORY_JOIN_CHANNEL:
-            try:
-                await client(JoinChannelRequest(entity))
-            except Exception:
-                pass
         return await client.get_input_entity(entity)
 
     async def _resolve_peer_by_username(self, client, username: str):
@@ -387,19 +404,20 @@ class Spammer:
         if not uname:
             return None
         resolved = await client(ResolveUsernameRequest(username=uname))
-        peer = await client.get_input_entity(resolved.peer)
-        if config.STORY_JOIN_CHANNEL:
-            try:
-                entity = await client.get_entity(uname)
-                await client(JoinChannelRequest(entity))
-            except Exception:
-                pass
-        return peer
+        return await client.get_input_entity(resolved.peer)
 
-    async def resolve_story_peer(self, client, story: StoryRef, story_cache: dict):
+    async def resolve_story_peer(
+        self,
+        client,
+        story: StoryRef,
+        story_cache: dict,
+        joined_keys: set[str] | None = None,
+    ):
+        joined_keys = joined_keys if joined_keys is not None else set()
         key = story.peer.lower()
         cached = story_cache.get(key)
         if cached is not None:
+            await self._ensure_joined(client, story.peer, joined_keys)
             return cached
 
         uname = story.peer.lstrip("@")
@@ -409,6 +427,7 @@ class Spammer:
         for attempt in range(1, retries + 1):
             try:
                 peer = await client.get_input_entity(uname)
+                await self._ensure_joined(client, uname, joined_keys)
                 story_cache[key] = peer
                 return peer
             except (UsernameInvalidError, UsernameNotOccupiedError):
@@ -418,7 +437,7 @@ class Spammer:
                     raise
             except FloodWaitError as exc:
                 last_exc = exc
-                wait = min(getattr(exc, "seconds", 5) or 5, 30)
+                wait = min(getattr(exc, "seconds", 5) or 5, 45)
                 await asyncio.sleep(wait)
                 continue
             except Exception as exc:
@@ -432,13 +451,14 @@ class Spammer:
                 try:
                     peer = await resolver(client, uname)
                     if peer is not None:
+                        await self._ensure_joined(client, uname, joined_keys)
                         story_cache[key] = peer
                         return peer
                 except (UsernameInvalidError, UsernameNotOccupiedError):
                     raise
                 except FloodWaitError as exc:
                     last_exc = exc
-                    wait = min(getattr(exc, "seconds", 5) or 5, 30)
+                    wait = min(getattr(exc, "seconds", 5) or 5, 45)
                     await asyncio.sleep(wait)
                     break
                 except Exception as exc:
@@ -451,43 +471,78 @@ class Spammer:
             raise last_exc
         raise UsernameNotOccupiedError(request=None)
 
-    async def warm_story_peers(self, client, sid: str, story_cache: dict, session_skip_stories: set):
-        """Перед рассылкой: каждый аккаунт резолвит все stories и вступает в каналы."""
+    async def warm_story_peers(
+        self,
+        client,
+        sid: str,
+        story_cache: dict,
+        joined_keys: set[str],
+    ) -> int:
+        """Перед рассылкой: каждый аккаунт резолвит все stories, вступает в каналы, несколько проходов."""
         if not config.STORY_WARM_ON_START:
-            return
-        pool = [s for s in self.stories if not self.is_story_bad(s)]
-        if not pool:
-            return
-        ok = 0
-        for story in pool:
-            key = self.story_key(story)
-            if key in session_skip_stories or story.peer.lower() in story_cache:
-                ok += 1
-                continue
-            try:
-                await self.resolve_story_peer(client, story, story_cache)
-                ok += 1
-            except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError) as exc:
-                session_skip_stories.add(key)
-                log.warning(f"{sid} | 📖 warm: {story.url} недоступна ({humanize(exc)})")
-            except Exception as exc:
-                log.warning(f"{sid} | 📖 warm: {story.url} позже ({humanize(exc)})")
-            await asyncio.sleep(config.STORY_RESOLVE_DELAY)
-        if config.LOG_SESSION_EVENTS or ok < len(pool):
-            log.info(f"{sid} | 📖 warm stories: {ok}/{len(pool)} готовы к рассылке")
+            return len(self.stories)
+        pending = [s for s in self.stories if not self.is_story_bad(s)]
+        if not pending:
+            return 0
 
-    async def send_story(self, client, target_entity, story: StoryRef, story_cache: dict):
-        try:
-            story_peer = await self.resolve_story_peer(client, story, story_cache)
-        except TypeNotFoundError:
-            apply_telethon_patch()
-            raise
-        except ValueError as exc:
-            if is_story_peer_error(exc):
-                raise UsernameNotOccupiedError(request=None) from exc
-            raise
-        media = InputMediaStory(peer=story_peer, id=story.story_id)
-        await client.send_file(target_entity, file=media)
+        passes = max(1, config.STORY_WARM_PASSES)
+        for pass_n in range(1, passes + 1):
+            still_pending = []
+            for story in pending:
+                key = story.peer.lower()
+                if key in story_cache:
+                    continue
+                try:
+                    await self.resolve_story_peer(client, story, story_cache, joined_keys)
+                except Exception as exc:
+                    still_pending.append(story)
+                    if pass_n == passes:
+                        log.warning(f"{sid} | 📖 warm pass {pass_n}: {story.url} — {humanize(exc)}")
+                await asyncio.sleep(config.STORY_RESOLVE_DELAY)
+            pending = still_pending
+            if not pending:
+                break
+            if pass_n < passes:
+                await asyncio.sleep(1.0 * pass_n)
+
+        ready = sum(1 for s in self.stories if not self.is_story_bad(s) and s.peer.lower() in story_cache)
+        total = sum(1 for s in self.stories if not self.is_story_bad(s))
+        log.info(f"{sid} | 📖 warm stories: {ready}/{total} готовы (вступил в {len(joined_keys)} каналов)")
+        return ready
+
+    async def send_story(
+        self,
+        client,
+        target_entity,
+        story: StoryRef,
+        story_cache: dict,
+        joined_keys: set[str],
+    ):
+        last_exc = None
+        for attempt in range(2):
+            try:
+                story_peer = await self.resolve_story_peer(client, story, story_cache, joined_keys)
+            except TypeNotFoundError:
+                apply_telethon_patch()
+                raise
+            except ValueError as exc:
+                if is_story_peer_error(exc):
+                    raise UsernameNotOccupiedError(request=None) from exc
+                raise
+            try:
+                media = InputMediaStory(peer=story_peer, id=story.story_id)
+                await client.send_file(target_entity, file=media)
+                return
+            except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError) as exc:
+                last_exc = exc
+                story_cache.pop(story.peer.lower(), None)
+                joined_keys.discard(story.peer.lower())
+                if attempt == 0:
+                    await asyncio.sleep(config.STORY_RESOLVE_DELAY)
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
 
     async def run_session(self, path):
         rng = random.Random(os.urandom(16))
@@ -589,14 +644,25 @@ class Spammer:
         target_idx = 0
         total = len(targets)
         story_cache: dict[str, object] = {}
+        joined_keys: set[str] = set()
         dead_targets: set[int] = set()
         peer_flood_total = 0
-        session_skip_stories: set[tuple[str, int]] = set()
+        story_fail_counts: dict[tuple[str, int], int] = {}
 
-        def _skip_story(story: StoryRef, reason: str):
-            session_skip_stories.add(self.story_key(story))
+        await self.warm_story_peers(client, sid, story_cache, joined_keys)
+
+        def _bump_story_fail(story: StoryRef, reason: str):
+            key = self.story_key(story)
+            story_fail_counts[key] = story_fail_counts.get(key, 0) + 1
             story_cache.pop(story.peer.lower(), None)
-            log.warning(f"{sid} | ⚠ story {story.url}: skip у сессии ({reason}) — другие аккаунты продолжат")
+            joined_keys.discard(story.peer.lower())
+            n = story_fail_counts[key]
+            if n >= config.STORY_SKIP_AFTER:
+                log.warning(
+                    f"{sid} | ⚠ story {story.url}: пауза у сессии после {n} ошибок ({reason})"
+                )
+            elif n <= 3 or n % 5 == 0:
+                log.warning(f"{sid} | ⚠ story {story.url}: retry ({reason}), попытка {n}")
 
         while True:
             if target_idx >= total:
@@ -621,10 +687,12 @@ class Spammer:
             kind_tag = "ЛС" if target.kind == "user" else "группа"
 
             try:
-                story = self.pick_story(rng, session_skip_stories)
+                story = self.pick_story(rng, story_fail_counts)
                 if story is None:
-                    if session_skip_stories:
-                        session_skip_stories.clear()
+                    if story_fail_counts:
+                        story_fail_counts.clear()
+                        story_cache.clear()
+                        joined_keys.clear()
                         story = self.pick_story(rng)
                 if story is None:
                     alive = len(self.stories) - sum(1 for s in self.stories if self.is_story_bad(s))
@@ -636,7 +704,7 @@ class Spammer:
 
                 try:
                     async with self.sema:
-                        await self.send_story(client, target.entity, story, story_cache)
+                        await self.send_story(client, target.entity, story, story_cache, joined_keys)
                     n = self.mark_sent()
                     sent_local += 1
                     errors = bad_peers = 0
@@ -663,7 +731,7 @@ class Spammer:
                     await asyncio.sleep(w)
                     continue
                 except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError, TypeNotFoundError) as ue:
-                    _skip_story(story, humanize(ue))
+                    _bump_story_fail(story, humanize(ue))
                     pause = self._error_pause(rng)
                     if pause > 0:
                         await asyncio.sleep(pause)
@@ -729,7 +797,7 @@ class Spammer:
                     return "retry"
                 except Exception as ex:
                     if is_story_peer_error(ex):
-                        _skip_story(story, humanize(ex))
+                        _bump_story_fail(story, humanize(ex))
                         pause = self._error_pause(rng)
                         if pause > 0:
                             await asyncio.sleep(pause)
