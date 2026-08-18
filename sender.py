@@ -350,8 +350,8 @@ class Spammer:
                 for entry in self.iter_session_files():
                     if entry.name not in self.seen:
                         self.seen.add(entry.name)
-                        self.push_front(entry.path)
-                        log.info(f"🚀 Новая сессия → {entry.name} (в начало очереди)")
+                        self.push_back(entry.path)
+                        log.info(f"🆕 Новая сессия → {entry.name} (в конец, grace {config.NEW_SESSION_GRACE_SEC}с)")
                         added = True
                 if added:
                     self.save_seen()
@@ -738,6 +738,17 @@ class Spammer:
 
     async def worker(self, path):
         try:
+            try:
+                age = time.time() - os.path.getmtime(path)
+            except OSError:
+                age = config.NEW_SESSION_GRACE_SEC
+            if age < config.NEW_SESSION_GRACE_SEC:
+                self.slots.release()
+                wait = min(45, config.NEW_SESSION_GRACE_SEC - age)
+                await asyncio.sleep(wait)
+                if not self.stop.is_set():
+                    self.push_back(path)
+                return
             result = await self.run_session(path)
         except asyncio.CancelledError:
             self.slots.release()
