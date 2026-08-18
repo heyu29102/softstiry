@@ -16,6 +16,8 @@ from opentele.tl import TelegramClient
 from opentele.api import API
 from telethon.errors import (
     ChatAdminRequiredError,
+    ChatSendMediaForbiddenError,
+    ChatSendPhotosForbiddenError,
     ChatWriteForbiddenError,
     ChannelInvalidError,
     FloodWaitError,
@@ -78,6 +80,8 @@ def humanize(e):
         return "заблокирован в чате"
     if isinstance(e, ChatWriteForbiddenError):
         return "нет права писать"
+    if isinstance(e, (ChatSendMediaForbiddenError, ChatSendPhotosForbiddenError)):
+        return "медиа/story запрещено в чате"
     if isinstance(e, ChatAdminRequiredError):
         return "нужен админ"
     if isinstance(e, FloodWaitError):
@@ -157,6 +161,7 @@ class Spammer:
         self.story_warm_partial = 0
         self.story_warm_zero = 0
         self.story_err_ts = deque()
+        self.story_resolve_sema = asyncio.Semaphore(config.STORY_RESOLVE_CONCURRENT)
 
     def push_front(self, path):
         self.pending.appendleft(path)
@@ -452,48 +457,31 @@ class Spammer:
         last_exc: BaseException | None = None
         retries = max(1, config.STORY_RESOLVE_RETRIES)
 
-        for attempt in range(1, retries + 1):
-            try:
-                peer = await client.get_input_entity(uname)
-                await self._ensure_joined(client, uname, joined_keys)
-                story_cache[key] = peer
-                return peer
-            except (UsernameInvalidError, UsernameNotOccupiedError):
-                raise
-            except ValueError as exc:
-                if not is_story_peer_error(exc):
-                    raise
-            except FloodWaitError as exc:
-                last_exc = exc
-                wait = min(getattr(exc, "seconds", 5) or 5, 45)
-                await asyncio.sleep(wait)
-                continue
-            except Exception as exc:
-                last_exc = exc
+        async with self.story_resolve_sema:
+            for attempt in range(1, retries + 1):
+                for resolver in (
+                    self._resolve_peer_by_entity,
+                    self._resolve_peer_by_username,
+                    self._resolve_peer_from_dialogs,
+                ):
+                    try:
+                        peer = await resolver(client, uname)
+                        if peer is not None:
+                            await self._ensure_joined(client, uname, joined_keys)
+                            story_cache[key] = peer
+                            return peer
+                    except (UsernameInvalidError, UsernameNotOccupiedError):
+                        raise
+                    except FloodWaitError as exc:
+                        last_exc = exc
+                        wait = min(getattr(exc, "seconds", 5) or 5, 60)
+                        await asyncio.sleep(wait)
+                        break
+                    except Exception as exc:
+                        last_exc = exc
 
-            for resolver in (
-                self._resolve_peer_by_entity,
-                self._resolve_peer_by_username,
-                self._resolve_peer_from_dialogs,
-            ):
-                try:
-                    peer = await resolver(client, uname)
-                    if peer is not None:
-                        await self._ensure_joined(client, uname, joined_keys)
-                        story_cache[key] = peer
-                        return peer
-                except (UsernameInvalidError, UsernameNotOccupiedError):
-                    raise
-                except FloodWaitError as exc:
-                    last_exc = exc
-                    wait = min(getattr(exc, "seconds", 5) or 5, 45)
-                    await asyncio.sleep(wait)
-                    break
-                except Exception as exc:
-                    last_exc = exc
-
-            if attempt < retries:
-                await asyncio.sleep(config.STORY_RESOLVE_DELAY * attempt)
+                if attempt < retries:
+                    await asyncio.sleep(config.STORY_RESOLVE_DELAY * attempt)
 
         if last_exc and not is_permanent_story_peer_error(last_exc):
             raise last_exc
@@ -509,6 +497,8 @@ class Spammer:
         """Перед рассылкой: каждый аккаунт резолвит все stories, вступает в каналы, несколько проходов."""
         if not config.STORY_WARM_ON_START:
             return len(self.stories)
+        if config.STORY_WARM_STAGGER_MAX > 0:
+            await asyncio.sleep(random.uniform(0, config.STORY_WARM_STAGGER_MAX))
         pending = [s for s in self.stories if not self.is_story_bad(s)]
         if not pending:
             return 0
@@ -796,6 +786,14 @@ class Spammer:
                         await asyncio.sleep(pause)
                     continue
                 except (ChatWriteForbiddenError, UserBannedInChannelError, ChatAdminRequiredError) as ue:
+                    log.warning(f"{sid} | ⚠ {target.label}: {humanize(ue)}")
+                    if target_id is not None:
+                        dead_targets.add(target_id)
+                    pause = self._error_pause(rng)
+                    if pause > 0:
+                        await asyncio.sleep(pause)
+                    continue
+                except (ChatSendMediaForbiddenError, ChatSendPhotosForbiddenError) as ue:
                     log.warning(f"{sid} | ⚠ {target.label}: {humanize(ue)}")
                     if target_id is not None:
                         dead_targets.add(target_id)
