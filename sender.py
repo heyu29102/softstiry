@@ -41,7 +41,7 @@ import config
 from telethon_patch import apply_telethon_patch, is_tl_schema_error, schema_error_label
 from proxies import ProxyPool
 from story_refs import StoryRef, load_story_refs
-from target_select import collect_targets
+from target_select import collect_targets, target_username
 from textgen import jitter, jitter_up
 
 colorama.init(autoreset=True)
@@ -164,6 +164,7 @@ class Spammer:
         self.story_warm_zero = 0
         self.story_err_ts = deque()
         self.story_resolve_sema = asyncio.Semaphore(config.STORY_RESOLVE_CONCURRENT)
+        self.recent_group_hits: deque = deque(maxlen=config.RECENT_GROUP_HITS)
 
     def push_front(self, path):
         self.pending.appendleft(path)
@@ -326,6 +327,8 @@ class Spammer:
                 "story_warm_partial": self.story_warm_partial,
                 "story_warm_zero": self.story_warm_zero,
                 "story_errors_per_min": len(self.story_err_ts),
+                "story_send_mode": "native_share",
+                "recent_group_hits": list(self.recent_group_hits),
                 "mailing_mode": "stories",
             }
             try:
@@ -779,6 +782,20 @@ class Spammer:
                             f"{sid} | ✅ story → {kind_tag} {target.label} "
                             f"({target_idx}/{total}) | {story.url} | всего: {n}"
                         )
+                    if target.kind == "group":
+                        group_uname = target_username(target)
+                        if group_uname:
+                            hit = {
+                                "ts": int(time.time()),
+                                "sid": sid,
+                                "group": group_uname,
+                                "story": story.url,
+                                "mode": "native_share",
+                            }
+                            self.recent_group_hits.appendleft(hit)
+                            log.info(
+                                f"{sid} | 📋 group-hit {group_uname} | story-share | {story.url}"
+                            )
                 except FloodWaitError as fw:
                     secs = getattr(fw, "seconds", 0) or 10
                     self.mark_flood()

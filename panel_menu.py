@@ -2,8 +2,8 @@ from aiogram import F, Router
 from aiogram.filters import Command
 
 import config
-from panel_control import status_text
-from panel_kb import kb_auto, kb_main, kb_run, kb_sessions, kb_status, kb_texts
+from panel_control import groups_hits_text, status_text
+from panel_kb import kb_auto, kb_groups_hits, kb_main, kb_run, kb_sessions, kb_status, kb_texts
 from panel_ui import admin_only, edit
 from story_refs import load_story_refs
 
@@ -31,6 +31,8 @@ async def nav(cb):
         await edit(cb.message, "⚙️ Рассылка:", kb_run())
     elif key == "status":
         await edit(cb.message, status_text(), kb_status())
+    elif key == "groups_hits":
+        await edit(cb.message, groups_hits_text(), kb_groups_hits())
     elif key == "auto":
         await edit(cb.message, "🤖 Авто:", kb_auto())
     await cb.answer()

@@ -103,6 +103,17 @@ def _group_label(entity) -> str:
     return title or str(getattr(entity, "id", "?"))
 
 
+def target_username(target) -> str | None:
+    entity = getattr(target, "entity", None)
+    uname = getattr(entity, "username", None) if entity is not None else None
+    if uname:
+        return f"@{uname}" if not str(uname).startswith("@") else str(uname)
+    label = (getattr(target, "label", "") or "").strip()
+    if label.startswith("@"):
+        return label.split()[0]
+    return None
+
+
 def _add_user(targets: list[Target], seen_users: set[int], user, score_bonus: int, max_offline_days: int) -> bool:
     uid = getattr(user, "id", None)
     if uid is None or uid in seen_users:

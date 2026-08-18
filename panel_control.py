@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 import config
@@ -271,6 +272,39 @@ def fmt_uptime(sec):
     return f"{d}d {h:02}:{m:02}:{sec:02}" if d else f"{h:02}:{m:02}:{sec:02}"
 
 
+def _format_hit_time(ts: int) -> str:
+    try:
+        return datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+    except Exception:
+        return "—"
+
+
+def groups_hits_text():
+    s = read_stats() or {}
+    fresh = bool(s) and (time.time() - s.get("ts", 0) < 60)
+    hits = s.get("recent_group_hits") or []
+    mode = s.get("story_send_mode") or "native_share"
+    lines = [
+        "📋 <b>Последние группы с @username</b>",
+        f"Режим story: <b>{'пересылка (native)' if mode == 'native_share' else mode}</b>",
+        "",
+    ]
+    if not fresh and hits:
+        lines.append("<i>⚠ статистика может быть устаревшей</i>\n")
+    if not hits:
+        lines.append("Пока пусто — ждём успешных отправок в публичные группы.")
+    else:
+        for i, hit in enumerate(hits[: config.RECENT_GROUP_HITS], 1):
+            t = _format_hit_time(hit.get("ts", 0))
+            lines.append(
+                f"{i}. <b>{hit.get('group', '?')}</b>\n"
+                f"   {t} | {hit.get('sid', '?')}\n"
+                f"   {hit.get('story', '')}"
+            )
+    lines.append("\n<i>В логе: grep '📋 group-hit' app.log</i>")
+    return "\n".join(lines)
+
+
 def status_text():
     run = app_running()
     s = read_stats() or {}
@@ -294,6 +328,15 @@ def status_text():
         f"📨 Режим: <b>📖 stories → ЛС + группы</b>\n"
         f"🛰 Прокси в кулдауне: <b>{dash(g('proxies_in_cooldown'))}</b>/<b>{dash(g('proxies_total'))}</b>\n"
         f"⚠️ битых stories: <b>{dash(g('stories_bad'))}</b>\n"
-        f"📜 app.log: <b>{log_kb} КБ</b> | 🧹 bad: <b>{bad}</b>"
+        f"📋 story: <b>{'пересылка' if g('story_send_mode') == 'native_share' else dash(g('story_send_mode'))}</b>\n"
+    )
+    hits = s.get("recent_group_hits") or []
+    if fresh and hits:
+        text += "\n<b>Последние группы @:</b>\n"
+        for hit in hits[:3]:
+            text += f"• {hit.get('group', '?')} <i>{_format_hit_time(hit.get('ts', 0))}</i>\n"
+        text += "<i>→ вкладка «📋 Группы @»</i>"
+    text += (
+        f"\n📜 app.log: <b>{log_kb} КБ</b> | 🧹 bad: <b>{bad}</b>"
         + ("" if fresh or not run else "\n<i>⚠ статистика устарела</i>")
     )
