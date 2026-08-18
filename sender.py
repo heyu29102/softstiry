@@ -183,8 +183,44 @@ class Spammer:
         except Exception:
             pass
 
+    def session_dirs(self) -> list:
+        """Все папки с .session — основная + peer (RU/intl) при роутинге."""
+        dirs = [config.SESSIONS_DIR]
+        peer = config.SESSIONS_PEER_DIR
+        if config.SESSION_ROUTE_ENABLED and peer and peer != config.SESSIONS_DIR:
+            try:
+                peer = peer.resolve()
+                if peer.is_dir() and peer not in dirs:
+                    dirs.append(peer)
+            except OSError:
+                pass
+        return dirs
+
+    def iter_session_files(self):
+        for sdir in self.session_dirs():
+            try:
+                for entry in os.scandir(str(sdir)):
+                    if entry.is_file() and entry.name.endswith(".session"):
+                        yield entry
+            except OSError:
+                continue
+
     def load_stories(self):
         self.stories = load_story_refs(config.STORIES_FILE)
+
+    async def _check_authorized(self, client, sid: str) -> bool:
+        for attempt in range(1, config.AUTH_CHECK_RETRIES + 1):
+            try:
+                if await client.is_user_authorized():
+                    return True
+            except Exception as e:
+                if attempt >= config.AUTH_CHECK_RETRIES:
+                    log.warning(f"{sid} | ❌ авторизация: {e}")
+                    return False
+            if attempt < config.AUTH_CHECK_RETRIES:
+                await asyncio.sleep(config.AUTH_CHECK_DELAY)
+        log.error(f"{sid} | ❌ не авторизована после {config.AUTH_CHECK_RETRIES} проверок, удаляю")
+        return False
 
     def story_key(self, story: StoryRef) -> tuple[str, int]:
         return (story.peer.lower(), story.story_id)
@@ -221,6 +257,7 @@ class Spammer:
         log.info(
             f"📖 историй в пуле: {len(self.stories)} | "
             f"🛰 прокси: {len(self.proxies)} | "
+            f"папки сессий: {len(self.session_dirs())} | "
             f"оффлайн лимит: {config.CONTACT_MAX_OFFLINE_DAYS}д"
         )
         if not self.proxies.proxies:
@@ -310,8 +347,8 @@ class Spammer:
         while not self.stop.is_set():
             try:
                 added = False
-                for entry in os.scandir(str(config.SESSIONS_DIR)):
-                    if entry.is_file() and entry.name.endswith(".session") and entry.name not in self.seen:
+                for entry in self.iter_session_files():
+                    if entry.name not in self.seen:
                         self.seen.add(entry.name)
                         self.push_front(entry.path)
                         log.info(f"🚀 Новая сессия → {entry.name} (в начало очереди)")
@@ -325,12 +362,11 @@ class Spammer:
     def bootstrap(self):
         self.load_seen()
         files = []
-        for entry in os.scandir(str(config.SESSIONS_DIR)):
-            if entry.is_file() and entry.name.endswith(".session"):
-                try:
-                    files.append((entry.stat().st_mtime, entry.path, entry.name))
-                except Exception:
-                    continue
+        for entry in self.iter_session_files():
+            try:
+                files.append((entry.stat().st_mtime, entry.path, entry.name))
+            except Exception:
+                continue
         files.sort()
         for _, path, name in files:
             self.seen.add(name)
@@ -419,8 +455,7 @@ class Spammer:
                 self.proxies.mark_bad(proxy)
                 return "retry"
             try:
-                if not await client.is_user_authorized():
-                    log.error(f"{sid} | ❌ не авторизована, удаляю")
+                if not await self._check_authorized(client, sid):
                     delete_after = True
                     return "drop"
             except Exception as e:
@@ -428,8 +463,7 @@ class Spammer:
                 return "retry"
             try:
                 me = await client.get_me()
-                if config.LOG_SESSION_EVENTS:
-                    log.info(f"{sid} | 🟢 {getattr(me, 'first_name', '?')} ({getattr(me, 'id', '?')})")
+                log.info(f"{sid} | 🟢 {getattr(me, 'first_name', '?')} ({getattr(me, 'id', '?')})")
             except Exception as e:
                 log.warning(f"{sid} | ❌ get_me: {e}")
                 return "retry"
@@ -564,7 +598,7 @@ class Spammer:
                     every = config.LOG_SUCCESS_EVERY
                     log_ok = (
                         every == 0
-                        or (every > 0 and sent_local % every == 0)
+                        or (every > 0 and n % every == 0)
                         or (config.LOG_SUCCESS_GROUPS and target.kind == "group")
                     )
                     if log_ok:
