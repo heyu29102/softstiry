@@ -494,9 +494,10 @@ class Spammer:
         story_cache: dict,
         joined_keys: set[str],
     ) -> int:
-        """Перед рассылкой: каждый аккаунт резолвит все stories, вступает в каналы, несколько проходов."""
-        if not config.STORY_WARM_ON_START:
-            return len(self.stories)
+        """Перед рассылкой: каждый аккаунт резолвит stories (full) или при первой отправке (lazy)."""
+        mode = config.STORY_WARM_MODE
+        if not config.STORY_WARM_ON_START or mode == "lazy":
+            return 0
         if config.STORY_WARM_STAGGER_MAX > 0:
             await asyncio.sleep(random.uniform(0, config.STORY_WARM_STAGGER_MAX))
         pending = [s for s in self.stories if not self.is_story_bad(s)]
