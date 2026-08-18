@@ -36,7 +36,6 @@ import config
 from telethon_patch import apply_telethon_patch, is_tl_schema_error, schema_error_label
 from proxies import ProxyPool
 from story_refs import StoryRef, load_story_refs
-from story_validate import StoryInvalidTracker, remove_story_keys, validate_loop
 from target_select import collect_targets
 from textgen import jitter, jitter_up
 
@@ -149,7 +148,6 @@ class Spammer:
         self.stop = asyncio.Event()
         self.flood_rest = {}
         self.bad_stories: dict[tuple[str, int], tuple[str, float]] = {}
-        self.story_invalid = StoryInvalidTracker()
 
     def push_front(self, path):
         self.pending.appendleft(path)
@@ -221,23 +219,6 @@ class Spammer:
         ttl = config.STORY_BAD_TTL if ttl is None else ttl
         self.bad_stories[self.story_key(story)] = (reason, time.time() + ttl)
         log.warning(f"📖 story истекла: {story.url} ({reason}, пауза {ttl}с)")
-
-    async def maybe_remove_story(self, story: StoryRef, reason: str):
-        if not self.story_invalid.should_remove(story, reason):
-            return
-        removed = await remove_story_keys({self.story_key(story)}, reason)
-        if removed:
-            self.stories = [s for s in self.stories if self.story_key(s) != self.story_key(story)]
-            self.bad_stories.pop(self.story_key(story), None)
-
-    async def refresh_stories_from_disk(self):
-        try:
-            self.stories = await asyncio.to_thread(load_story_refs, config.STORIES_FILE)
-        except Exception:
-            pass
-
-    async def story_validate_loop(self):
-        await validate_loop(self.stop, on_removed=self.refresh_stories_from_disk)
 
     def pick_story(self, rng: random.Random, skip: set | None = None) -> StoryRef | None:
         skip = skip or set()
@@ -606,9 +587,7 @@ class Spammer:
                     await asyncio.sleep(w)
                     continue
                 except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError, TypeNotFoundError) as ue:
-                    reason = humanize(ue)
-                    _skip_story(story, reason)
-                    await self.maybe_remove_story(story, reason)
+                    _skip_story(story, humanize(ue))
                     pause = self._error_pause(rng)
                     if pause > 0:
                         await asyncio.sleep(pause)
@@ -659,7 +638,6 @@ class Spammer:
                     msg = humanize(te)
                     if "STORY_ID_INVALID" in msg.upper():
                         self.mark_story_bad(story, "история истекла", ttl=300)
-                        await self.maybe_remove_story(story, msg)
                         log.warning(f"{sid} | ⚠ story {story.url}: {msg}")
                         pause = self._error_pause(rng, 2.0)
                         if pause > 0:
@@ -675,9 +653,7 @@ class Spammer:
                     return "retry"
                 except Exception as ex:
                     if is_story_peer_error(ex):
-                        reason = humanize(ex)
-                        _skip_story(story, reason)
-                        await self.maybe_remove_story(story, reason)
+                        _skip_story(story, humanize(ex))
                         pause = self._error_pause(rng)
                         if pause > 0:
                             await asyncio.sleep(pause)
@@ -766,7 +742,6 @@ class Spammer:
             asyncio.create_task(self.write_stats_loop()),
             asyncio.create_task(self.log_stats_loop()),
             asyncio.create_task(self.reload_stories_loop()),
-            asyncio.create_task(self.story_validate_loop()),
         ]
         log.info(
             f"💬 Старт (stories). Лимит: {config.MAX_SESSIONS}, "
