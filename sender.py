@@ -30,6 +30,7 @@ from telethon.errors import (
 )
 from telethon.tl import functions
 from telethon.tl.functions.contacts import ResolveUsernameRequest
+from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.types import InputMediaStory
 
 import config
@@ -108,6 +109,10 @@ def is_story_peer_error(exc: BaseException) -> bool:
         msg = str(exc).lower()
         return "username" in msg or "as username" in msg
     return False
+
+
+def is_permanent_story_peer_error(exc: BaseException) -> bool:
+    return is_story_peer_error(exc)
 
 
 def delete_session_files(path):
@@ -365,15 +370,31 @@ class Spammer:
             pass
         return None
 
+    async def _resolve_peer_by_entity(self, client, username: str):
+        uname = username.lstrip("@")
+        if not uname:
+            return None
+        entity = await client.get_entity(uname)
+        if config.STORY_JOIN_CHANNEL:
+            try:
+                await client(JoinChannelRequest(entity))
+            except Exception:
+                pass
+        return await client.get_input_entity(entity)
+
     async def _resolve_peer_by_username(self, client, username: str):
         uname = username.lstrip("@")
         if not uname:
             return None
-        try:
-            resolved = await client(ResolveUsernameRequest(username=uname))
-            return await client.get_input_entity(resolved.peer)
-        except Exception:
-            return None
+        resolved = await client(ResolveUsernameRequest(username=uname))
+        peer = await client.get_input_entity(resolved.peer)
+        if config.STORY_JOIN_CHANNEL:
+            try:
+                entity = await client.get_entity(uname)
+                await client(JoinChannelRequest(entity))
+            except Exception:
+                pass
+        return peer
 
     async def resolve_story_peer(self, client, story: StoryRef, story_cache: dict):
         key = story.peer.lower()
@@ -381,24 +402,54 @@ class Spammer:
         if cached is not None:
             return cached
 
-        peer = None
-        try:
-            peer = await client.get_input_entity(story.peer)
-        except (UsernameInvalidError, UsernameNotOccupiedError, ValueError) as exc:
-            if isinstance(exc, ValueError) and not is_story_peer_error(exc):
+        uname = story.peer.lstrip("@")
+        last_exc: BaseException | None = None
+        retries = max(1, config.STORY_RESOLVE_RETRIES)
+
+        for attempt in range(1, retries + 1):
+            try:
+                peer = await client.get_input_entity(uname)
+                story_cache[key] = peer
+                return peer
+            except (UsernameInvalidError, UsernameNotOccupiedError):
                 raise
-        except Exception:
-            pass
+            except ValueError as exc:
+                if not is_story_peer_error(exc):
+                    raise
+            except FloodWaitError as exc:
+                last_exc = exc
+                wait = min(getattr(exc, "seconds", 5) or 5, 30)
+                await asyncio.sleep(wait)
+                continue
+            except Exception as exc:
+                last_exc = exc
 
-        if peer is None:
-            peer = await self._resolve_peer_by_username(client, story.peer)
-        if peer is None:
-            peer = await self._resolve_peer_from_dialogs(client, story.peer)
-        if peer is None:
-            raise UsernameNotOccupiedError(request=None)
+            for resolver in (
+                self._resolve_peer_by_entity,
+                self._resolve_peer_by_username,
+                self._resolve_peer_from_dialogs,
+            ):
+                try:
+                    peer = await resolver(client, uname)
+                    if peer is not None:
+                        story_cache[key] = peer
+                        return peer
+                except (UsernameInvalidError, UsernameNotOccupiedError):
+                    raise
+                except FloodWaitError as exc:
+                    last_exc = exc
+                    wait = min(getattr(exc, "seconds", 5) or 5, 30)
+                    await asyncio.sleep(wait)
+                    break
+                except Exception as exc:
+                    last_exc = exc
 
-        story_cache[key] = peer
-        return peer
+            if attempt < retries:
+                await asyncio.sleep(config.STORY_RESOLVE_DELAY * attempt)
+
+        if last_exc and not is_permanent_story_peer_error(last_exc):
+            raise last_exc
+        raise UsernameNotOccupiedError(request=None)
 
     async def send_story(self, client, target_entity, story: StoryRef, story_cache: dict):
         try:
@@ -520,7 +571,7 @@ class Spammer:
         def _skip_story(story: StoryRef, reason: str):
             session_skip_stories.add(self.story_key(story))
             story_cache.pop(story.peer.lower(), None)
-            log.warning(f"{sid} | ⚠ story {story.url}: skip у сессии ({reason})")
+            log.warning(f"{sid} | ⚠ story {story.url}: skip у сессии ({reason}) — другие аккаунты продолжат")
 
         while True:
             if target_idx >= total:
