@@ -634,8 +634,10 @@ class Spammer:
                     return "retry"
                 log.warning(f"{sid} | ⚠️ нет целей (контакты/группы) — в очередь позже")
                 return "retry"
-            if config.LOG_SESSION_EVENTS:
-                log.info(f"{sid} | 🎯 целей: {users_n} ЛС + {groups_n} групп")
+            if users_n or groups_n:
+                log.info(f"{sid} | 🎯 целей: {users_n} ЛС + {groups_n} групп → рассылка")
+            if config.LOG_SESSION_EVENTS and not (users_n or groups_n):
+                log.info(f"{sid} | 🎯 целей: 0")
             return await self.send_loop(client, sid, path, targets, rng)
         except asyncio.CancelledError:
             raise
@@ -947,9 +949,10 @@ class Spammer:
             asyncio.create_task(self.reload_stories_loop()),
         ]
         log.info(
-            f"💬 Старт (stories). Лимит: {config.MAX_SESSIONS}, "
+            f"💬 Старт (stories). Слоты: {config.MAX_SESSIONS}, "
             f"параллельно: {config.MAX_CONCURRENT}, delay: {config.DELAY_MESSAGES}s, "
-            f"историй: {len(self.stories)}"
+            f"историй: {len(self.stories)}, warm={config.STORY_WARM_MODE}, "
+            f"группы→ЛС={config.TARGET_GROUPS_FIRST}"
         )
         try:
             await self.stop.wait()
