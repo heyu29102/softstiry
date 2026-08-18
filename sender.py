@@ -91,7 +91,7 @@ def humanize(e):
     if isinstance(e, ChannelInvalidError):
         return "битый канал/story peer"
     if isinstance(e, (UsernameInvalidError, UsernameNotOccupiedError)):
-        return "битый username story-канала"
+        return "канал story не резолвится у сессии"
     if isinstance(e, TypeNotFoundError):
         return schema_error_label(e)
     msg = (getattr(e, "message", "") or str(e) or "").upper()
@@ -153,6 +153,10 @@ class Spammer:
         self.stop = asyncio.Event()
         self.flood_rest = {}
         self.bad_stories: dict[tuple[str, int], tuple[str, float]] = {}
+        self.story_warm_full = 0
+        self.story_warm_partial = 0
+        self.story_warm_zero = 0
+        self.story_err_ts = deque()
 
     def push_front(self, path):
         self.pending.appendleft(path)
@@ -219,6 +223,22 @@ class Spammer:
             return False
         return True
 
+    def mark_story_error(self):
+        now = time.time()
+        self.story_err_ts.append(now)
+        while self.story_err_ts and self.story_err_ts[0] < now - 60:
+            self.story_err_ts.popleft()
+
+    def _record_warm(self, ready: int, total: int):
+        if total <= 0:
+            return
+        if ready >= total:
+            self.story_warm_full += 1
+        elif ready > 0:
+            self.story_warm_partial += 1
+        else:
+            self.story_warm_zero += 1
+
     def mark_story_bad(self, story: StoryRef, reason: str, ttl: int | None = None):
         """Глобальный бан — только для подтверждённо мёртвой story (STORY_ID_INVALID)."""
         ttl = config.STORY_BAD_TTL if ttl is None else ttl
@@ -249,6 +269,8 @@ class Spammer:
         log.info(
             f"📖 историй в пуле: {len(self.stories)} | "
             f"🛰 прокси: {len(self.proxies)} | "
+            f"story: warm={config.STORY_WARM_ON_START} join={config.STORY_JOIN_CHANNEL} "
+            f"retries={config.STORY_RESOLVE_RETRIES} | "
             f"оффлайн лимит: {config.CONTACT_MAX_OFFLINE_DAYS}д"
         )
         if not self.proxies.proxies:
@@ -293,6 +315,10 @@ class Spammer:
                 "proxies_in_cooldown": self.proxies.cooldown_count(),
                 "stories_in_pool": len(self.stories),
                 "stories_bad": sum(1 for _, (_, until) in self.bad_stories.items() if until > now),
+                "story_warm_full": self.story_warm_full,
+                "story_warm_partial": self.story_warm_partial,
+                "story_warm_zero": self.story_warm_zero,
+                "story_errors_per_min": len(self.story_err_ts),
                 "mailing_mode": "stories",
             }
             try:
@@ -312,9 +338,11 @@ class Spammer:
             self._trim(self.flood_ts, time.time())
             log.info(
                 f"📊 в минуту: {len(self.sent_ts)} | flood/мин: {len(self.flood_ts)} | "
+                f"story-ошибок/мин: {len(self.story_err_ts)} | "
                 f"активных: {self.active}/{config.MAX_SESSIONS} | очередь: {len(self.pending)} | "
                 f"всего: {self.total} | прокси в кулдауне: {self.proxies.cooldown_count()} | "
-                f"историй: {len(self.stories)}"
+                f"историй: {len(self.stories)} | "
+                f"warm OK/частично/0: {self.story_warm_full}/{self.story_warm_partial}/{self.story_warm_zero}"
             )
 
     async def reload_stories_loop(self):
@@ -507,7 +535,25 @@ class Spammer:
 
         ready = sum(1 for s in self.stories if not self.is_story_bad(s) and s.peer.lower() in story_cache)
         total = sum(1 for s in self.stories if not self.is_story_bad(s))
-        log.info(f"{sid} | 📖 warm stories: {ready}/{total} готовы (вступил в {len(joined_keys)} каналов)")
+        self._record_warm(ready, total)
+
+        if ready >= total:
+            tag, detail = "✅", "все истории видит"
+        elif ready > 0:
+            tag, detail = "⚠️", f"видит {ready}/{total}"
+        else:
+            tag, detail = "❌", "не видит истории — проверь прокси/сессию"
+
+        join_note = f", join={len(joined_keys)}" if config.STORY_JOIN_CHANNEL else ""
+        if config.LOG_STORY_EVENTS or ready < total:
+            log.info(f"{sid} | 📖 warm {tag} {ready}/{total} ({detail}{join_note})")
+            if ready < total:
+                missing = [
+                    s.url
+                    for s in self.stories
+                    if not self.is_story_bad(s) and s.peer.lower() not in story_cache
+                ]
+                log.warning(f"{sid} | 📖 не резолвятся: {', '.join(missing[:5])}")
         return ready
 
     async def send_story(
@@ -650,8 +696,14 @@ class Spammer:
         story_fail_counts: dict[tuple[str, int], int] = {}
 
         await self.warm_story_peers(client, sid, story_cache, joined_keys)
+        alive_total = sum(1 for s in self.stories if not self.is_story_bad(s))
+        if alive_total and len(story_cache) == 0:
+            log.warning(f"{sid} | 📖 повторный warm — первая попытка 0/{alive_total}")
+            await asyncio.sleep(2.0)
+            await self.warm_story_peers(client, sid, story_cache, joined_keys)
 
         def _bump_story_fail(story: StoryRef, reason: str):
+            self.mark_story_error()
             key = self.story_key(story)
             story_fail_counts[key] = story_fail_counts.get(key, 0) + 1
             story_cache.pop(story.peer.lower(), None)
@@ -674,8 +726,11 @@ class Spammer:
                     await asyncio.sleep(pause)
 
             if time.time() - start >= stint:
-                if config.LOG_SESSION_EVENTS:
-                    log.info(f"{sid} | ♻️ смена слота (~{stint}с), отправлено {sent_local}")
+                if config.LOG_SESSION_EVENTS or config.LOG_STORY_EVENTS:
+                    log.info(
+                        f"{sid} | ♻️ слот ~{stint}с: отправлено {sent_local}, "
+                        f"story в кэше {len(story_cache)}/{alive_total or '?'}"
+                    )
                 return "rotate"
 
             target = targets[target_idx]
@@ -708,6 +763,8 @@ class Spammer:
                     n = self.mark_sent()
                     sent_local += 1
                     errors = bad_peers = 0
+                    if config.LOG_STORY_FIRST_SEND and sent_local == 1:
+                        log.info(f"{sid} | 📖 первая story ушла → {kind_tag} {target.label} | {story.url}")
                     every = config.LOG_SUCCESS_EVERY
                     log_ok = (
                         every == 0
@@ -732,6 +789,8 @@ class Spammer:
                     continue
                 except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError, TypeNotFoundError) as ue:
                     _bump_story_fail(story, humanize(ue))
+                    if config.LOG_STORY_EVENTS:
+                        log.warning(f"{sid} | 📖 story err: {story.url} — {humanize(ue)}")
                     pause = self._error_pause(rng)
                     if pause > 0:
                         await asyncio.sleep(pause)
@@ -782,7 +841,8 @@ class Spammer:
                     msg = humanize(te)
                     if "STORY_ID_INVALID" in msg.upper():
                         self.mark_story_bad(story, "история истекла", ttl=300)
-                        log.warning(f"{sid} | ⚠ story {story.url}: {msg}")
+                        self.mark_story_error()
+                        log.warning(f"{sid} | 📖 story ИСТЕКЛА: {story.url} — обнови ID в stories.txt")
                         pause = self._error_pause(rng, 2.0)
                         if pause > 0:
                             await asyncio.sleep(pause)
