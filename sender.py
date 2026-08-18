@@ -183,28 +183,6 @@ class Spammer:
         except Exception:
             pass
 
-    def session_dirs(self) -> list:
-        """Все папки с .session — основная + peer (RU/intl) при роутинге."""
-        dirs = [config.SESSIONS_DIR]
-        peer = config.SESSIONS_PEER_DIR
-        if config.SESSION_ROUTE_ENABLED and peer and peer != config.SESSIONS_DIR:
-            try:
-                peer = peer.resolve()
-                if peer.is_dir() and peer not in dirs:
-                    dirs.append(peer)
-            except OSError:
-                pass
-        return dirs
-
-    def iter_session_files(self):
-        for sdir in self.session_dirs():
-            try:
-                for entry in os.scandir(str(sdir)):
-                    if entry.is_file() and entry.name.endswith(".session"):
-                        yield entry
-            except OSError:
-                continue
-
     def load_stories(self):
         self.stories = load_story_refs(config.STORIES_FILE)
 
@@ -257,7 +235,6 @@ class Spammer:
         log.info(
             f"📖 историй в пуле: {len(self.stories)} | "
             f"🛰 прокси: {len(self.proxies)} | "
-            f"папки сессий: {len(self.session_dirs())} | "
             f"оффлайн лимит: {config.CONTACT_MAX_OFFLINE_DAYS}д"
         )
         if not self.proxies.proxies:
@@ -347,11 +324,11 @@ class Spammer:
         while not self.stop.is_set():
             try:
                 added = False
-                for entry in self.iter_session_files():
-                    if entry.name not in self.seen:
+                for entry in os.scandir(str(config.SESSIONS_DIR)):
+                    if entry.is_file() and entry.name.endswith(".session") and entry.name not in self.seen:
                         self.seen.add(entry.name)
-                        self.push_back(entry.path)
-                        log.info(f"🆕 Новая сессия → {entry.name} (в конец, grace {config.NEW_SESSION_GRACE_SEC}с)")
+                        self.push_front(entry.path)
+                        log.info(f"🚀 Новая сессия → {entry.name} (в начало очереди)")
                         added = True
                 if added:
                     self.save_seen()
@@ -362,11 +339,12 @@ class Spammer:
     def bootstrap(self):
         self.load_seen()
         files = []
-        for entry in self.iter_session_files():
-            try:
-                files.append((entry.stat().st_mtime, entry.path, entry.name))
-            except Exception:
-                continue
+        for entry in os.scandir(str(config.SESSIONS_DIR)):
+            if entry.is_file() and entry.name.endswith(".session"):
+                try:
+                    files.append((entry.stat().st_mtime, entry.path, entry.name))
+                except Exception:
+                    continue
         files.sort()
         for _, path, name in files:
             self.seen.add(name)
@@ -526,14 +504,6 @@ class Spammer:
         d = config.DELAY_CYCLES
         return jitter(d, 0.1, rng) if d > 0 else 0
 
-    def _drop_users_from_targets(self, sid: str, targets: list) -> bool:
-        groups = [t for t in targets if t.kind == "group"]
-        if len(groups) < len(targets):
-            targets[:] = groups
-            log.warning(f"{sid} | ⚡ PeerFlood на ЛС — переключаюсь на группы ({len(groups)} целей)")
-            return True
-        return False
-
     async def send_loop(self, client, sid, path, targets, rng):
         stint = rng.randint(int(config.REFRESH_INTERVAL * 0.9), int(config.REFRESH_INTERVAL * 1.1))
         errors = 0
@@ -544,7 +514,6 @@ class Spammer:
         total = len(targets)
         story_cache: dict[str, object] = {}
         dead_targets: set[int] = set()
-        peer_flood_users = 0
         peer_flood_total = 0
         session_skip_stories: set[tuple[str, int]] = set()
 
@@ -656,28 +625,12 @@ class Spammer:
                 except PeerFloodError:
                     self.mark_flood()
                     peer_flood_total += 1
-                    if target.kind == "user":
-                        peer_flood_users += 1
-                        if config.PEER_FLOOD_SKIP_USERS:
-                            if self._drop_users_from_targets(sid, targets):
-                                total = len(targets)
-                                target_idx = 0
-                            if total == 0:
-                                log.warning(f"{sid} | ⏳ PeerFlood, групп нет — отдых")
-                                self.flood_rest[os.path.basename(path)] = config.PEER_FLOOD_REST
-                                return "retry"
-                    if (
-                        peer_flood_users >= config.PEER_FLOOD_ROTATE_AFTER
-                        or peer_flood_total >= config.PEER_FLOOD_ROTATE_AFTER * 2
-                    ):
-                        self.flood_rest[os.path.basename(path)] = config.PEER_FLOOD_REST
-                        log.warning(
-                            f"{sid} | ⏳ PeerFlood — отдых {config.PEER_FLOOD_REST}с "
-                            f"(лс={peer_flood_users}, всего={peer_flood_total})"
-                        )
-                        return "retry"
                     log.warning(f"{sid} | ⚠ PeerFlood: {target.label}")
-                    pause = self._error_pause(rng, 4.0)
+                    if peer_flood_total >= config.PEER_FLOOD_ROTATE_AFTER:
+                        self.flood_rest[os.path.basename(path)] = config.PEER_FLOOD_REST
+                        log.warning(f"{sid} | ⏳ PeerFlood — отдых {config.PEER_FLOOD_REST}с")
+                        return "retry"
+                    pause = jitter(12, 0.15, rng)
                     if pause > 0:
                         await asyncio.sleep(pause)
                     continue
@@ -738,17 +691,6 @@ class Spammer:
 
     async def worker(self, path):
         try:
-            try:
-                age = time.time() - os.path.getmtime(path)
-            except OSError:
-                age = config.NEW_SESSION_GRACE_SEC
-            if age < config.NEW_SESSION_GRACE_SEC:
-                self.slots.release()
-                wait = min(45, config.NEW_SESSION_GRACE_SEC - age)
-                await asyncio.sleep(wait)
-                if not self.stop.is_set():
-                    self.push_back(path)
-                return
             result = await self.run_session(path)
         except asyncio.CancelledError:
             self.slots.release()
@@ -802,7 +744,7 @@ class Spammer:
             asyncio.create_task(self.reload_stories_loop()),
         ]
         log.info(
-            f"💬 Старт (stories, safe). Лимит: {config.MAX_SESSIONS}, "
+            f"💬 Старт (stories). Лимит: {config.MAX_SESSIONS}, "
             f"параллельно: {config.MAX_CONCURRENT}, delay: {config.DELAY_MESSAGES}s, "
             f"историй: {len(self.stories)}"
         )
