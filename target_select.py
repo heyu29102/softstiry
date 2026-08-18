@@ -8,6 +8,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+import config
 from telethon.tl.functions.contacts import GetContactsRequest
 from telethon.tl.types import (
     UserStatusEmpty,
