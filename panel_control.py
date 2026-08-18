@@ -317,7 +317,7 @@ def status_text():
     stories = len(load_story_refs(config.STORIES_FILE))
     domains = len(config.load_domain_links())
     bots = len(config.load_bot_links())
-    return (
+    text = (
         f"🖥 app.py: {'🟢 запущен' if run else '🔴 остановлен'} {('PID ' + str(read_pid())) if run else ''}\n"
         f"⏱ Аптайм: <b>{up}</b>\n"
         f"📩 Всего отправлено: <b>{dash(g('total_sent'))}</b>\n"
@@ -340,3 +340,4 @@ def status_text():
         f"\n📜 app.log: <b>{log_kb} КБ</b> | 🧹 bad: <b>{bad}</b>"
         + ("" if fresh or not run else "\n<i>⚠ статистика устарела</i>")
     )
+    return text
