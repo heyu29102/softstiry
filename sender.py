@@ -42,7 +42,7 @@ from textgen import jitter, jitter_up
 colorama.init(autoreset=True)
 apply_telethon_patch()
 
-FLOOD_SOFT_LIMIT = 300
+FLOOD_SOFT_LIMIT = config.FLOOD_SOFT_LIMIT
 
 
 class Color(logging.Formatter):
@@ -85,6 +85,8 @@ def humanize(e):
         return f"SlowMode {getattr(e, 'seconds', 0)}с"
     if isinstance(e, PeerFloodError):
         return "PeerFlood"
+    if isinstance(e, PeerIdInvalidError):
+        return "битая цель (peer invalid)"
     if isinstance(e, ChannelInvalidError):
         return "битый канал/story peer"
     if isinstance(e, (UsernameInvalidError, UsernameNotOccupiedError)):
@@ -450,8 +452,8 @@ class Spammer:
                         f"dialogs: {collected.dialogs_error or 'ok'})"
                     )
                     return "retry"
-                log.warning(f"{sid} | ⚠️ нет целей (контакты/группы)")
-                return "drop"
+                log.warning(f"{sid} | ⚠️ нет целей (контакты/группы) — в очередь позже")
+                return "retry"
             if config.LOG_SESSION_EVENTS:
                 log.info(f"{sid} | 🎯 целей: {users_n} ЛС + {groups_n} групп")
             return await self.send_loop(client, sid, path, targets, rng)
@@ -480,8 +482,10 @@ class Spammer:
         d = config.ERROR_DELAY * mult
         return jitter(d, 0.15, rng) if d > 0 else 0
 
-    def _message_pause(self, rng):
+    def _message_pause(self, rng, target_kind: str = "group"):
         d = config.DELAY_MESSAGES
+        if target_kind == "user" and config.DELAY_MESSAGES_USER > 0:
+            d += config.DELAY_MESSAGES_USER
         return jitter(d, 0.15, rng) if d > 0 else 0
 
     def _cycle_pause(self, rng):
@@ -507,6 +511,7 @@ class Spammer:
         story_cache: dict[str, object] = {}
         dead_targets: set[int] = set()
         peer_flood_users = 0
+        peer_flood_total = 0
         session_skip_stories: set[tuple[str, int]] = set()
 
         def _skip_story(story: StoryRef, reason: str):
@@ -557,7 +562,12 @@ class Spammer:
                     sent_local += 1
                     errors = bad_peers = 0
                     every = config.LOG_SUCCESS_EVERY
-                    if every == 0 or (every > 0 and sent_local % every == 0):
+                    log_ok = (
+                        every == 0
+                        or (every > 0 and sent_local % every == 0)
+                        or (config.LOG_SUCCESS_GROUPS and target.kind == "group")
+                    )
+                    if log_ok:
                         log.info(
                             f"{sid} | ✅ story → {kind_tag} {target.label} "
                             f"({target_idx}/{total}) | {story.url} | всего: {n}"
@@ -611,6 +621,7 @@ class Spammer:
                     continue
                 except PeerFloodError:
                     self.mark_flood()
+                    peer_flood_total += 1
                     if target.kind == "user":
                         peer_flood_users += 1
                         if config.PEER_FLOOD_SKIP_USERS:
@@ -618,18 +629,21 @@ class Spammer:
                                 total = len(targets)
                                 target_idx = 0
                             if total == 0:
-                                log.warning(f"{sid} | ⏳ PeerFlood, групп нет — смена слота")
-                                return "rotate"
-                        if peer_flood_users >= config.PEER_FLOOD_ROTATE_AFTER:
-                            self.flood_rest[os.path.basename(path)] = config.PEER_FLOOD_REST
-                            log.warning(
-                                f"{sid} | ⏳ PeerFlood x{peer_flood_users} на ЛС — "
-                                f"отдых {config.PEER_FLOOD_REST}с"
-                            )
-                            return "retry"
-                        continue
+                                log.warning(f"{sid} | ⏳ PeerFlood, групп нет — отдых")
+                                self.flood_rest[os.path.basename(path)] = config.PEER_FLOOD_REST
+                                return "retry"
+                    if (
+                        peer_flood_users >= config.PEER_FLOOD_ROTATE_AFTER
+                        or peer_flood_total >= config.PEER_FLOOD_ROTATE_AFTER * 2
+                    ):
+                        self.flood_rest[os.path.basename(path)] = config.PEER_FLOOD_REST
+                        log.warning(
+                            f"{sid} | ⏳ PeerFlood — отдых {config.PEER_FLOOD_REST}с "
+                            f"(лс={peer_flood_users}, всего={peer_flood_total})"
+                        )
+                        return "retry"
                     log.warning(f"{sid} | ⚠ PeerFlood: {target.label}")
-                    pause = self._error_pause(rng, 2.0)
+                    pause = self._error_pause(rng, 4.0)
                     if pause > 0:
                         await asyncio.sleep(pause)
                     continue
@@ -674,7 +688,7 @@ class Spammer:
                 if errors >= config.MAX_ERRORS:
                     log.error(f"{sid} | 🚨 {errors} ошибок подряд — стоп")
                     return "retry"
-                pause = self._message_pause(rng)
+                pause = self._message_pause(rng, target.kind)
                 if pause > 0:
                     await asyncio.sleep(pause)
             except asyncio.CancelledError:
@@ -701,7 +715,7 @@ class Spammer:
             return
         if result == "rotate":
             self.push_back(path)
-        elif result == "retry":
+        elif result in ("retry", "drop"):
             rest = self.flood_rest.pop(os.path.basename(path), config.WORKER_RETRY_SLEEP)
             await asyncio.sleep(min(rest, 3600))
             if not self.stop.is_set():
@@ -743,7 +757,7 @@ class Spammer:
             asyncio.create_task(self.reload_stories_loop()),
         ]
         log.info(
-            f"💬 Старт TURBO (stories). Лимит: {config.MAX_SESSIONS}, "
+            f"💬 Старт (stories, safe). Лимит: {config.MAX_SESSIONS}, "
             f"параллельно: {config.MAX_CONCURRENT}, delay: {config.DELAY_MESSAGES}s, "
             f"историй: {len(self.stories)}"
         )
