@@ -9,7 +9,6 @@ import signal
 import sys
 import time
 from collections import deque
-from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 
 import colorama
@@ -242,6 +241,11 @@ class Spammer:
             return "лимит resolve у сессии (канал живой, retry)"
         return reason
 
+    def _channel_recently_ok(self, peer: str, within: float = 300.0) -> bool:
+        key = peer.lstrip("@").lower()
+        ts = self.story_channel_last_ok.get(key)
+        return ts is not None and time.time() - ts < within
+
     async def _get_resolve_channel_lock(self, username: str) -> asyncio.Lock:
         key = username.lstrip("@").lower()
         async with self._resolve_channel_guard:
@@ -251,21 +255,18 @@ class Spammer:
                 self._resolve_channel_locks[key] = lock
             return lock
 
-    @asynccontextmanager
-    async def _throttle_channel_resolve(self, username: str):
+    async def _channel_gap_wait(self, username: str):
+        gap = config.STORY_RESOLVE_CHANNEL_GAP
+        if gap <= 0:
+            return
         key = username.lstrip("@").lower()
-        lock = await self._get_resolve_channel_lock(username)
-        async with lock:
-            gap = config.STORY_RESOLVE_CHANNEL_GAP
-            if gap > 0:
-                last = self._channel_resolve_last_ts.get(key, 0.0)
-                wait = gap - (time.time() - last)
-                if wait > 0:
-                    await asyncio.sleep(wait)
-            try:
-                yield
-            finally:
-                self._channel_resolve_last_ts[key] = time.time()
+        last = self._channel_resolve_last_ts.get(key, 0.0)
+        wait = gap - (time.time() - last)
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+    def _touch_channel_resolve(self, username: str):
+        self._channel_resolve_last_ts[username.lstrip("@").lower()] = time.time()
 
     def mark_story_error(self):
         now = time.time()
@@ -293,6 +294,7 @@ class Spammer:
         self,
         rng: random.Random,
         fail_counts: dict[tuple[str, int], int] | None = None,
+        story_cache: dict | None = None,
     ) -> StoryRef | None:
         fail_counts = fail_counts or {}
         limit = config.STORY_SKIP_AFTER
@@ -305,6 +307,10 @@ class Spammer:
             pool = [s for s in self.stories if not self.is_story_bad(s)]
         if not pool:
             return None
+        if story_cache and config.STORY_PREFER_CACHED:
+            cached_pool = [s for s in pool if s.peer.lower() in story_cache]
+            if cached_pool:
+                return rng.choice(cached_pool)
         return rng.choice(pool)
 
     def load(self):
@@ -480,6 +486,39 @@ class Spammer:
         resolved = await client(ResolveUsernameRequest(username=uname))
         return await client.get_input_entity(resolved.peer)
 
+    async def _resolve_peer_fast(self, client, username: str):
+        """Без ResolveUsername — не бьёт в лимит lookup по username."""
+        for resolver in (
+            self._resolve_peer_by_entity,
+            self._resolve_peer_from_dialogs,
+        ):
+            try:
+                peer = await resolver(client, username)
+                if peer is not None:
+                    return peer
+            except (UsernameInvalidError, UsernameNotOccupiedError, FloodWaitError):
+                raise
+            except Exception:
+                continue
+        return None
+
+    async def _resolve_peer_username_throttled(self, client, username: str) -> object | None:
+        lock = await self._get_resolve_channel_lock(username)
+        acquired = False
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=config.STORY_RESOLVE_LOCK_TIMEOUT)
+            acquired = True
+            await self._channel_gap_wait(username)
+            async with self.story_resolve_sema:
+                peer = await self._resolve_peer_by_username(client, username)
+            self._touch_channel_resolve(username)
+            return peer
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            if acquired:
+                lock.release()
+
     async def resolve_story_peer(
         self,
         client,
@@ -498,38 +537,42 @@ class Spammer:
         last_exc: BaseException | None = None
         retries = max(1, config.STORY_RESOLVE_RETRIES)
 
-        async with self._throttle_channel_resolve(uname):
-            cached = story_cache.get(key)
-            if cached is not None:
-                await self._ensure_joined(client, story.peer, joined_keys)
-                return cached
-
+        # Быстрый путь: get_entity / dialogs — без очереди по каналу.
+        try:
             async with self.story_resolve_sema:
-                for attempt in range(1, retries + 1):
-                    for resolver in (
-                        self._resolve_peer_by_entity,
-                        self._resolve_peer_by_username,
-                        self._resolve_peer_from_dialogs,
-                    ):
-                        try:
-                            peer = await resolver(client, uname)
-                            if peer is not None:
-                                await self._ensure_joined(client, uname, joined_keys)
-                                story_cache[key] = peer
-                                self.story_channel_last_ok[key] = time.time()
-                                return peer
-                        except (UsernameInvalidError, UsernameNotOccupiedError):
-                            raise
-                        except FloodWaitError as exc:
-                            last_exc = exc
-                            wait = min(getattr(exc, "seconds", 5) or 5, 60)
-                            await asyncio.sleep(wait)
-                            break
-                        except Exception as exc:
-                            last_exc = exc
+                peer = await self._resolve_peer_fast(client, uname)
+            if peer is not None:
+                await self._ensure_joined(client, uname, joined_keys)
+                story_cache[key] = peer
+                self.story_channel_last_ok[key] = time.time()
+                return peer
+        except FloodWaitError as exc:
+            last_exc = exc
+            await asyncio.sleep(min(getattr(exc, "seconds", 5) or 5, 30))
+        except (UsernameInvalidError, UsernameNotOccupiedError):
+            raise
 
-                    if attempt < retries:
-                        await asyncio.sleep(config.STORY_RESOLVE_DELAY * attempt)
+        # Медленный путь: ResolveUsername — короткий lock, без долгой очереди.
+        for attempt in range(1, retries + 1):
+            try:
+                peer = await self._resolve_peer_username_throttled(client, uname)
+                if peer is not None:
+                    await self._ensure_joined(client, uname, joined_keys)
+                    story_cache[key] = peer
+                    self.story_channel_last_ok[key] = time.time()
+                    return peer
+                # Lock занят — другая сессия уже резолвит; не стопорим пайплайн.
+                break
+            except FloodWaitError as exc:
+                last_exc = exc
+                await asyncio.sleep(min(getattr(exc, "seconds", 5) or 5, 60))
+            except (UsernameInvalidError, UsernameNotOccupiedError):
+                raise
+            except Exception as exc:
+                last_exc = exc
+
+            if attempt < retries:
+                await asyncio.sleep(config.STORY_RESOLVE_DELAY * attempt)
 
         if last_exc and not is_permanent_story_peer_error(last_exc):
             raise last_exc
@@ -628,8 +671,9 @@ class Spammer:
                 return
             except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError) as exc:
                 last_exc = exc
-                story_cache.pop(story.peer.lower(), None)
-                joined_keys.discard(story.peer.lower())
+                if not self._channel_recently_ok(story.peer):
+                    story_cache.pop(story.peer.lower(), None)
+                    joined_keys.discard(story.peer.lower())
                 if attempt == 0:
                     await asyncio.sleep(config.STORY_RESOLVE_DELAY)
                     continue
@@ -756,8 +800,9 @@ class Spammer:
             reason = self._story_err_label(story, reason)
             key = self.story_key(story)
             story_fail_counts[key] = story_fail_counts.get(key, 0) + 1
-            story_cache.pop(story.peer.lower(), None)
-            joined_keys.discard(story.peer.lower())
+            if not self._channel_recently_ok(story.peer):
+                story_cache.pop(story.peer.lower(), None)
+                joined_keys.discard(story.peer.lower())
             n = story_fail_counts[key]
             if n >= config.STORY_SKIP_AFTER:
                 log.warning(
@@ -792,13 +837,13 @@ class Spammer:
             kind_tag = "ЛС" if target.kind == "user" else "группа"
 
             try:
-                story = self.pick_story(rng, story_fail_counts)
+                story = self.pick_story(rng, story_fail_counts, story_cache)
                 if story is None:
                     if story_fail_counts:
                         story_fail_counts.clear()
                         story_cache.clear()
                         joined_keys.clear()
-                        story = self.pick_story(rng)
+                        story = self.pick_story(rng, story_cache=story_cache)
                 if story is None:
                     alive = len(self.stories) - sum(1 for s in self.stories if self.is_story_bad(s))
                     log.error(
