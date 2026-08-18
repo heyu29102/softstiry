@@ -57,12 +57,14 @@ def setup_logger():
     if log.handlers:
         return log
     fmt, datefmt = "[%(asctime)s] %(message)s", "%H:%M:%S"
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setFormatter(Color(fmt, datefmt))
     fh = RotatingFileHandler(str(config.APP_LOG), maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
     fh.setFormatter(logging.Formatter(fmt, datefmt))
-    log.addHandler(sh)
     log.addHandler(fh)
+    # stdout панели тоже пишет в app.log — без TTY не дублируем в файл.
+    if sys.stdout.isatty():
+        sh = logging.StreamHandler(sys.stdout)
+        sh.setFormatter(Color(fmt, datefmt))
+        log.addHandler(sh)
     return log
 
 
@@ -94,6 +96,15 @@ def humanize(e):
     if "CHAT_SEND_MEDIA_FORBIDDEN" in msg:
         return "медиа запрещено"
     return f"{type(e).__name__}: {e}"
+
+
+def is_story_peer_error(exc: BaseException) -> bool:
+    if isinstance(exc, (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError)):
+        return True
+    if isinstance(exc, ValueError):
+        msg = str(exc).lower()
+        return "username" in msg or "as username" in msg
+    return False
 
 
 def delete_session_files(path):
@@ -345,6 +356,14 @@ class Spammer:
 
         try:
             peer = await client.get_input_entity(story.peer)
+        except (UsernameInvalidError, UsernameNotOccupiedError, ValueError) as exc:
+            if isinstance(exc, ValueError) and not is_story_peer_error(exc):
+                raise
+            peer = await self._resolve_peer_from_dialogs(client, story.peer)
+            if peer is None:
+                if isinstance(exc, UsernameNotOccupiedError):
+                    raise
+                raise UsernameNotOccupiedError(request=None) from exc
         except Exception:
             peer = await self._resolve_peer_from_dialogs(client, story.peer)
             if peer is None:
@@ -360,6 +379,11 @@ class Spammer:
             raise
         except (UsernameInvalidError, UsernameNotOccupiedError) as exc:
             self.mark_story_bad(story, humanize(exc), ttl=3600)
+            raise
+        except ValueError as exc:
+            if is_story_peer_error(exc):
+                self.mark_story_bad(story, "битый username story-канала", ttl=3600)
+                raise UsernameNotOccupiedError(request=None) from exc
             raise
         except ChannelInvalidError as exc:
             self.mark_story_bad(story, humanize(exc), ttl=3600)
@@ -459,6 +483,14 @@ class Spammer:
         d = config.DELAY_CYCLES
         return jitter(d, 0.1, rng) if d > 0 else 0
 
+    def _drop_users_from_targets(self, sid: str, targets: list) -> bool:
+        groups = [t for t in targets if t.kind == "group"]
+        if len(groups) < len(targets):
+            targets[:] = groups
+            log.warning(f"{sid} | ⚡ PeerFlood на ЛС — переключаюсь на группы ({len(groups)} целей)")
+            return True
+        return False
+
     async def send_loop(self, client, sid, path, targets, rng):
         stint = rng.randint(int(config.REFRESH_INTERVAL * 0.9), int(config.REFRESH_INTERVAL * 1.1))
         errors = 0
@@ -469,6 +501,7 @@ class Spammer:
         total = len(targets)
         story_cache: dict[str, object] = {}
         dead_targets: set[int] = set()
+        peer_flood_users = 0
 
         while True:
             if target_idx >= total:
@@ -526,6 +559,8 @@ class Spammer:
                     await asyncio.sleep(w)
                     continue
                 except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError, TypeNotFoundError) as ue:
+                    if isinstance(ue, (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError)):
+                        self.mark_story_bad(story, humanize(ue), ttl=3600)
                     log.warning(f"{sid} | ⚠ story {story.url}: {humanize(ue)}")
                     story_cache.pop(story.peer.lower(), None)
                     pause = self._error_pause(rng)
@@ -562,12 +597,30 @@ class Spammer:
                     if pause > 0:
                         await asyncio.sleep(pause)
                     continue
-                except PeerFloodError as te:
-                    log.error(f"{sid} | ✖ {target.label}: {humanize(te)}")
-                    errors += 1
-                    pause = self._error_pause(rng, 3.0)
+                except PeerFloodError:
+                    self.mark_flood()
+                    if target.kind == "user":
+                        peer_flood_users += 1
+                        if config.PEER_FLOOD_SKIP_USERS:
+                            if self._drop_users_from_targets(sid, targets):
+                                total = len(targets)
+                                target_idx = 0
+                            if total == 0:
+                                log.warning(f"{sid} | ⏳ PeerFlood, групп нет — смена слота")
+                                return "rotate"
+                        if peer_flood_users >= config.PEER_FLOOD_ROTATE_AFTER:
+                            self.flood_rest[os.path.basename(path)] = config.PEER_FLOOD_REST
+                            log.warning(
+                                f"{sid} | ⏳ PeerFlood x{peer_flood_users} на ЛС — "
+                                f"отдых {config.PEER_FLOOD_REST}с"
+                            )
+                            return "retry"
+                        continue
+                    log.warning(f"{sid} | ⚠ PeerFlood: {target.label}")
+                    pause = self._error_pause(rng, 2.0)
                     if pause > 0:
                         await asyncio.sleep(pause)
+                    continue
                 except RPCError as te:
                     msg = humanize(te)
                     if "STORY_ID_INVALID" in msg.upper():
@@ -586,6 +639,14 @@ class Spammer:
                     log.warning(f"{sid} | ⚠ отключение: {ex}")
                     return "retry"
                 except Exception as ex:
+                    if is_story_peer_error(ex):
+                        self.mark_story_bad(story, humanize(ex), ttl=3600)
+                        log.warning(f"{sid} | ⚠ story {story.url}: {humanize(ex)}")
+                        story_cache.pop(story.peer.lower(), None)
+                        pause = self._error_pause(rng)
+                        if pause > 0:
+                            await asyncio.sleep(pause)
+                        continue
                     if is_tl_schema_error(ex):
                         log.warning(f"{sid} | ⚠ story {story.url}: {schema_error_label(ex)}")
                         story_cache.pop(story.peer.lower(), None)

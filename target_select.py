@@ -159,7 +159,10 @@ async def collect_targets(
     groups = [t for t in targets if t.kind == "group"]
     users.sort(key=lambda t: t.score, reverse=True)
     rng.shuffle(groups)
-    result.targets = users + groups
+    if config.TARGET_GROUPS_FIRST:
+        result.targets = groups + users
+    else:
+        result.targets = users + groups
     result.users = len(users)
     result.groups = len(groups)
     return result
