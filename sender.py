@@ -15,6 +15,7 @@ import colorama
 from opentele.tl import TelegramClient
 from opentele.api import API
 from telethon.errors import (
+    AuthKeyUnregisteredError,
     ChatAdminRequiredError,
     ChatSendMediaForbiddenError,
     ChatSendPhotosForbiddenError,
@@ -23,10 +24,13 @@ from telethon.errors import (
     FloodWaitError,
     PeerFloodError,
     PeerIdInvalidError,
+    PhoneNumberBannedError,
     RPCError,
     SlowModeWaitError,
     TypeNotFoundError,
     UserBannedInChannelError,
+    UserDeactivatedBanError,
+    UserDeactivatedError,
     UsernameInvalidError,
     UsernameNotOccupiedError,
 )
@@ -48,6 +52,12 @@ colorama.init(autoreset=True)
 apply_telethon_patch()
 
 FLOOD_SOFT_LIMIT = config.FLOOD_SOFT_LIMIT
+SESSION_DEAD_ERRORS = (
+    AuthKeyUnregisteredError,
+    UserDeactivatedBanError,
+    UserDeactivatedError,
+    PhoneNumberBannedError,
+)
 
 
 class Color(logging.Formatter):
@@ -168,6 +178,7 @@ class Spammer:
         self._resolve_channel_guard = asyncio.Lock()
         self._channel_resolve_last_ts: dict[str, float] = {}
         self.story_channel_last_ok: dict[str, float] = {}
+        self.auth_strikes: dict[str, int] = {}
         self.recent_group_hits: deque = deque(maxlen=config.RECENT_GROUP_HITS)
 
     def push_front(self, path):
@@ -207,19 +218,54 @@ class Spammer:
     def load_stories(self):
         self.stories = load_story_refs(config.STORIES_FILE)
 
-    async def _check_authorized(self, client, sid: str) -> bool:
+    def _session_key(self, path: str) -> str:
+        return os.path.basename(path)
+
+    def _handle_session_dead(self, sid: str, path: str, reason: str) -> tuple[bool, str]:
+        """Returns (delete_files, worker_result)."""
+        key = self._session_key(path)
+        self.auth_strikes[key] = self.auth_strikes.get(key, 0) + 1
+        strikes = self.auth_strikes[key]
+        if config.DELETE_SESSION_ON_AUTH_FAIL and strikes >= config.AUTH_DELETE_AFTER:
+            log.error(f"{sid} | ❌ удаляю после {strikes} подтверждений: {reason}")
+            return True, "drop"
+        rest = config.SESSION_AUTH_REST
+        self.flood_rest[key] = rest
+        log.warning(f"{sid} | 💤 {reason} — отдых {rest}с (strike {strikes}, не удаляю)")
+        return False, "retry"
+
+    def _clear_auth_strike(self, path: str):
+        self.auth_strikes.pop(self._session_key(path), None)
+
+    async def _session_auth_status(self, client, sid: str) -> str:
+        """ok | retry | dead"""
         for attempt in range(1, config.AUTH_CHECK_RETRIES + 1):
             try:
-                if await client.is_user_authorized():
-                    return True
-            except Exception as e:
+                if not await client.is_user_authorized():
+                    try:
+                        await client.get_me()
+                    except SESSION_DEAD_ERRORS as exc:
+                        log.warning(f"{sid} | 💀 {type(exc).__name__}")
+                        return "dead"
+                    except Exception as exc:
+                        if attempt >= config.AUTH_CHECK_RETRIES:
+                            log.warning(f"{sid} | ⚠️ не авторизована ({exc}), в очередь")
+                            return "retry"
+                    else:
+                        return "ok"
+                else:
+                    await client.get_me()
+                    return "ok"
+            except SESSION_DEAD_ERRORS as exc:
+                log.warning(f"{sid} | 💀 {type(exc).__name__}")
+                return "dead"
+            except Exception as exc:
                 if attempt >= config.AUTH_CHECK_RETRIES:
-                    log.warning(f"{sid} | ❌ авторизация: {e}")
-                    return False
+                    log.warning(f"{sid} | ⚠️ авторизация: {exc}, в очередь")
+                    return "retry"
             if attempt < config.AUTH_CHECK_RETRIES:
-                await asyncio.sleep(config.AUTH_CHECK_DELAY)
-        log.error(f"{sid} | ❌ не авторизована после {config.AUTH_CHECK_RETRIES} проверок, удаляю")
-        return False
+                await asyncio.sleep(config.AUTH_CHECK_DELAY * attempt)
+        return "retry"
 
     def story_key(self, story: StoryRef) -> tuple[str, int]:
         return (story.peer.lower(), story.story_id)
@@ -684,6 +730,8 @@ class Spammer:
     async def run_session(self, path):
         rng = random.Random(os.urandom(16))
         sid = os.path.splitext(os.path.basename(path))[0]
+        if config.SESSION_START_STAGGER_MAX > 0:
+            await asyncio.sleep(random.uniform(0, config.SESSION_START_STAGGER_MAX))
         proxy = self.proxies.acquire()
         if proxy is None:
             log.error(f"{sid} | ❌ нет свободных прокси")
@@ -699,19 +747,25 @@ class Spammer:
             except Exception as e:
                 log.warning(f"{sid} | ❌ подключение: {e}")
                 self.proxies.mark_bad(proxy)
+                self.flood_rest[self._session_key(path)] = config.WORKER_RETRY_SLEEP
                 return "retry"
-            try:
-                if not await self._check_authorized(client, sid):
-                    delete_after = True
-                    return "drop"
-            except Exception as e:
-                log.warning(f"{sid} | ❌ авторизация: {e}")
+            auth = await self._session_auth_status(client, sid)
+            if auth == "dead":
+                delete_after, result = self._handle_session_dead(sid, path, "бан/ключ мёртв")
+                return result
+            if auth != "ok":
+                self.flood_rest[self._session_key(path)] = config.SESSION_AUTH_REST
                 return "retry"
+            self._clear_auth_strike(path)
             try:
                 me = await client.get_me()
                 log.info(f"{sid} | 🟢 {getattr(me, 'first_name', '?')} ({getattr(me, 'id', '?')})")
+            except SESSION_DEAD_ERRORS as exc:
+                delete_after, result = self._handle_session_dead(sid, path, type(exc).__name__)
+                return result
             except Exception as e:
                 log.warning(f"{sid} | ❌ get_me: {e}")
+                self.flood_rest[self._session_key(path)] = config.SESSION_AUTH_REST
                 return "retry"
 
             collected = await collect_targets(
@@ -738,7 +792,10 @@ class Spammer:
                 log.info(f"{sid} | 🎯 целей: {users_n} ЛС + {groups_n} групп → рассылка")
             if config.LOG_SESSION_EVENTS and not (users_n or groups_n):
                 log.info(f"{sid} | 🎯 целей: 0")
-            return await self.send_loop(client, sid, path, targets, rng)
+            result = await self.send_loop(client, sid, path, targets, rng)
+            if result == "dead":
+                delete_after, result = self._handle_session_dead(sid, path, "бан во время рассылки")
+            return result
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -786,6 +843,7 @@ class Spammer:
         joined_keys: set[str] = set()
         dead_targets: set[int] = set()
         peer_flood_total = 0
+        skip_users_after_flood = False
         story_fail_counts: dict[tuple[str, int], int] = {}
 
         await self.warm_story_peers(client, sid, story_cache, joined_keys)
@@ -832,6 +890,8 @@ class Spammer:
             target_idx += 1
             target_id = getattr(target.entity, "id", None)
             if target_id is not None and target_id in dead_targets:
+                continue
+            if skip_users_after_flood and target.kind == "user":
                 continue
 
             kind_tag = "ЛС" if target.kind == "user" else "группа"
@@ -889,13 +949,16 @@ class Spammer:
                     secs = getattr(fw, "seconds", 0) or 10
                     self.mark_flood()
                     if secs > FLOOD_SOFT_LIMIT:
-                        self.flood_rest[os.path.basename(path)] = secs
+                        self.flood_rest[self._session_key(path)] = secs
                         log.warning(f"{sid} | ⏳ FloodWait {secs}с — увожу сессию на отдых")
                         return "retry"
                     w = jitter_up(secs, rng)
                     log.warning(f"{sid} | ⏳ FloodWait {secs}с, пауза ~{int(w)}с")
                     await asyncio.sleep(w)
                     continue
+                except SESSION_DEAD_ERRORS as exc:
+                    log.warning(f"{sid} | 💀 {type(exc).__name__} во время отправки")
+                    return "dead"
                 except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError, TypeNotFoundError) as ue:
                     msg = self._story_err_label(story, humanize(ue))
                     _bump_story_fail(story, msg)
@@ -946,12 +1009,14 @@ class Spammer:
                 except PeerFloodError:
                     self.mark_flood()
                     peer_flood_total += 1
+                    if config.PEER_FLOOD_SKIP_USERS:
+                        skip_users_after_flood = True
                     log.warning(f"{sid} | ⚠ PeerFlood: {target.label}")
                     if peer_flood_total >= config.PEER_FLOOD_ROTATE_AFTER:
-                        self.flood_rest[os.path.basename(path)] = config.PEER_FLOOD_REST
+                        self.flood_rest[self._session_key(path)] = config.PEER_FLOOD_REST
                         log.warning(f"{sid} | ⏳ PeerFlood — отдых {config.PEER_FLOOD_REST}с")
                         return "retry"
-                    pause = jitter(12, 0.15, rng)
+                    pause = jitter(18, 0.2, rng)
                     if pause > 0:
                         await asyncio.sleep(pause)
                     continue
@@ -972,6 +1037,7 @@ class Spammer:
                         await asyncio.sleep(pause)
                 except ConnectionError as ex:
                     log.warning(f"{sid} | ⚠ отключение: {ex}")
+                    self.flood_rest[self._session_key(path)] = config.WORKER_RETRY_SLEEP
                     return "retry"
                 except Exception as ex:
                     if is_story_peer_error(ex):
