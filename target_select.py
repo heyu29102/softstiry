@@ -144,7 +144,7 @@ async def collect_targets(
     try:
         contacts = await client(GetContactsRequest(hash=0))
         for user in contacts.users:
-            if config.CONTACT_MUTUAL_ONLY and not getattr(user, "mutual_contact", False):
+            if not getattr(user, "mutual_contact", False):
                 continue
             _add_user(targets, seen_users, user, 150, max_offline_days)
     except Exception as exc:
