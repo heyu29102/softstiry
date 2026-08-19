@@ -367,7 +367,8 @@ class Spammer:
             f"🛰 прокси: {len(self.proxies)} | "
             f"story: warm={config.STORY_WARM_ON_START} join={config.STORY_JOIN_CHANNEL} "
             f"retries={config.STORY_RESOLVE_RETRIES} | "
-            f"оффлайн лимит: {config.CONTACT_MAX_OFFLINE_DAYS}д"
+            f"оффлайн лимит: {config.CONTACT_MAX_OFFLINE_DAYS}д | "
+            f"auth-delete={config.DELETE_SESSION_ON_AUTH_FAIL} peer-skip-users={config.PEER_FLOOD_SKIP_USERS}"
         )
         if not self.proxies.proxies:
             log.error("❌ Нет прокси, выхожу")
