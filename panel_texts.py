@@ -14,7 +14,7 @@ from domain_setup import (
 from panel_control import esc
 from panel_kb import kb_back_texts
 from panel_ui import admin_only, reset_state, state, waiting
-from story_refs import load_story_refs, parse_story_line, save_story_refs
+from story_refs import load_story_refs, parse_story_line, rewrite_story_file_as_urls, save_story_refs
 
 router = Router()
 router.message.filter(admin_only)
@@ -203,6 +203,7 @@ def toggle_story_line(text):
 
 @router.callback_query(F.data == "href_story")
 async def cb_href_story(cb):
+    rewrite_story_file_as_urls(config.STORIES_FILE)
     refs = load_story_refs(config.STORIES_FILE)
 
     rows = [
@@ -222,7 +223,7 @@ async def cb_href_story(cb):
     rows.append("")
     rows.append("Отправь ссылку на story:")
     rows.append("<code>https://t.me/channel/s/1</code>")
-    rows.append("или <code>channel|1</code>")
+    rows.append("или коротко <code>channel|1</code> (сохранится как ссылка)")
     rows.append("")
     rows.append("• ссылка <b>не</b> в пуле → <b>добавлю</b>")
     rows.append("• ссылка уже в пуле → <b>удалю</b>")

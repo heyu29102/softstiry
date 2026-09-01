@@ -67,7 +67,7 @@ def load_story_refs(path: Path) -> list[StoryRef]:
 
 
 def format_story_line(ref: StoryRef) -> str:
-    return f"{ref.peer}|{ref.story_id}"
+    return ref.url
 
 
 def save_story_refs(refs: list[StoryRef], path: Path) -> None:
@@ -78,3 +78,12 @@ def save_story_refs(refs: list[StoryRef], path: Path) -> None:
     if body:
         body += "\n"
     atomic_write(path, body.encode("utf-8"))
+
+
+def rewrite_story_file_as_urls(path: Path) -> int:
+    """Перезаписать stories.txt в формате https://t.me/peer/s/id (миграция старых peer|id)."""
+    refs = load_story_refs(path)
+    if not refs:
+        return 0
+    save_story_refs(refs, path)
+    return len(refs)
