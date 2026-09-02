@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="${1:-/opt/new-soft}"
-BRANCH="${2:-cursor/domain-pool-mailing-9c6d}"
+BRANCH="${2:-cursor/min-members-story-rr-c290}"
 
 cd "$ROOT"
 
