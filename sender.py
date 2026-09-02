@@ -38,7 +38,7 @@ from telethon.tl import functions
 from telethon.tl.functions.contacts import ResolveUsernameRequest
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import SendMediaRequest
-from telethon.tl.types import InputMediaStory
+from telethon.tl.types import InputMediaStory, MessageMediaStory, UpdateMessageID, UpdateNewChannelMessage, UpdateNewMessage
 from telethon import helpers
 
 import config
@@ -69,6 +69,34 @@ class Color(logging.Formatter):
 
 def setup_logger():
     log = logging.getLogger("spam")
+
+
+class StorySendGhostError(Exception):
+    """Telegram вернул OK, но в Updates нет доставленного сообщения (пустышка)."""
+
+
+def _verify_send_media_result(result, story: StoryRef) -> int:
+    """Проверяем, что sendMedia реально создал сообщение, а не пустой ответ."""
+    updates = getattr(result, "updates", None) or []
+    msg_id = None
+    for upd in updates:
+        if isinstance(upd, (UpdateNewMessage, UpdateNewChannelMessage)):
+            msg = upd.message
+            msg_id = getattr(msg, "id", None)
+            media = getattr(msg, "media", None)
+            if isinstance(media, MessageMediaStory):
+                # История истекла: messageMediaStory без story — в чате пусто.
+                if getattr(media, "story", None) is None:
+                    raise StorySendGhostError(
+                        f"story {story.url}: messageMediaStory без story (истекла/недоступна)"
+                    )
+            break
+        if isinstance(upd, UpdateMessageID):
+            msg_id = upd.id
+            break
+    if not msg_id:
+        raise StorySendGhostError("sendMedia: нет message id в Updates")
+    return msg_id
     log.setLevel(logging.INFO)
     if log.handlers:
         return log
@@ -711,7 +739,7 @@ class Spammer:
             try:
                 media = InputMediaStory(peer=story_peer, id=story.story_id)
                 target_peer = await client.get_input_entity(target_entity)
-                await client(
+                result = await client(
                     SendMediaRequest(
                         peer=target_peer,
                         media=media,
@@ -719,6 +747,7 @@ class Spammer:
                         random_id=helpers.generate_random_long(),
                     )
                 )
+                _verify_send_media_result(result, story)
                 return
             except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError) as exc:
                 last_exc = exc
@@ -977,6 +1006,14 @@ class Spammer:
                             log.info(
                                 f"{sid} | 📋 group-hit {group_uname} | story-share | {story.url}"
                             )
+                except StorySendGhostError as ge:
+                    self.mark_story_error()
+                    _bump_story_fail(story, str(ge))
+                    log.warning(f"{sid} | 👻 пустая отправка (не считаем успехом): {target.label} — {ge}")
+                    pause = self._error_pause(rng, 1.5)
+                    if pause > 0:
+                        await asyncio.sleep(pause)
+                    continue
                 except FloodWaitError as fw:
                     secs = getattr(fw, "seconds", 0) or 10
                     self.mark_flood()
