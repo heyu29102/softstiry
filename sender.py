@@ -67,11 +67,18 @@ def is_unregistered_key_error(exc: BaseException | str | None) -> bool:
 
 
 def extract_sent_message_id(result) -> int | None:
-    for upd in getattr(result, "updates", None) or []:
+    updates = getattr(result, "updates", None) or []
+    for upd in updates:
         if isinstance(upd, (UpdateNewMessage, UpdateNewChannelMessage)):
-            mid = getattr(upd.message, "id", None)
+            mid = getattr(getattr(upd, "message", None), "id", None)
             if mid:
                 return int(mid)
+    for upd in updates:
+        msg = getattr(upd, "message", None)
+        mid = getattr(msg, "id", None) if msg is not None else None
+        if mid:
+            return int(mid)
+    for upd in updates:
         if isinstance(upd, UpdateMessageID):
             return int(upd.id)
     return None
@@ -201,6 +208,10 @@ class Spammer:
         self.story_channel_last_ok: dict[str, float] = {}
         self.auth_strikes: dict[str, int] = {}
         self.recent_group_hits: deque = deque(maxlen=config.RECENT_GROUP_HITS)
+        self.group_try = 0
+        self.group_ok = 0
+        self.group_ghost = 0
+        self.group_denied = 0
 
     def push_front(self, path):
         self.pending.appendleft(path)
@@ -443,6 +454,10 @@ class Spammer:
                 "story_errors_per_min": len(self.story_err_ts),
                 "story_send_mode": "native_share",
                 "recent_group_hits": list(self.recent_group_hits),
+                "group_try": self.group_try,
+                "group_ok": self.group_ok,
+                "group_ghost": self.group_ghost,
+                "group_denied": self.group_denied,
                 "mailing_mode": "stories",
             }
             try:
@@ -462,6 +477,8 @@ class Spammer:
             self._trim(self.flood_ts, time.time())
             log.info(
                 f"📊 в минуту: {len(self.sent_ts)} | flood/мин: {len(self.flood_ts)} | "
+                f"группы ok/try: {self.group_ok}/{self.group_try} "
+                f"(ghost {self.group_ghost}, отказ {self.group_denied}) | "
                 f"story-ошибок/мин: {len(self.story_err_ts)} | "
                 f"активных: {self.active}/{config.MAX_SESSIONS} | очередь: {len(self.pending)} | "
                 f"всего: {self.total} | прокси в кулдауне: {self.proxies.cooldown_count()} | "
@@ -534,15 +551,22 @@ class Spammer:
                 log.warning(f"📖 join @{uname}: {type(exc).__name__}")
 
     async def _confirm_sent_message(self, client, target_entity, msg_id: int) -> bool:
-        try:
-            msg = await client.get_messages(target_entity, ids=msg_id)
-            if msg is None:
-                return False
-            if isinstance(msg, (list, tuple)):
-                msg = msg[0] if msg else None
-            return bool(msg) and int(getattr(msg, "id", 0) or 0) == int(msg_id)
-        except Exception:
-            return False
+        retries = max(1, config.STORY_CONFIRM_RETRIES)
+        delay = max(0.0, config.STORY_CONFIRM_DELAY)
+        for attempt in range(retries):
+            try:
+                msg = await client.get_messages(target_entity, ids=msg_id)
+                if msg is None:
+                    pass
+                elif isinstance(msg, (list, tuple)):
+                    msg = msg[0] if msg else None
+                if msg is not None and int(getattr(msg, "id", 0) or 0) == int(msg_id):
+                    return True
+            except Exception:
+                pass
+            if attempt + 1 < retries and delay > 0:
+                await asyncio.sleep(delay)
+        return False
 
     async def _session_sees_story(self, client, story_peer, story_id: int) -> bool:
         if not config.STORY_VERIFY_SESSION:
@@ -1045,6 +1069,9 @@ class Spammer:
                 continue
 
             kind_tag = "ЛС" if target.kind == "user" else "группа"
+            is_group = target.kind == "group"
+            if is_group:
+                self.group_try += 1
 
             try:
                 story = self.pick_story(rng, story_fail_counts, story_cache, rr_idx=story_rr)
@@ -1069,7 +1096,12 @@ class Spammer:
                         msg_id = await self.send_story(
                             client, target.entity, story, story_cache, joined_keys
                         )
-                    if config.STORY_CONFIRM_IN_CHAT and not await self._confirm_sent_message(
+                    confirm = (
+                        config.STORY_CONFIRM_GROUPS
+                        if is_group
+                        else config.STORY_CONFIRM_IN_CHAT
+                    )
+                    if confirm and not await self._confirm_sent_message(
                         client, target.entity, msg_id
                     ):
                         raise StorySendNoMessageError(
@@ -1077,6 +1109,8 @@ class Spammer:
                         )
                     n = self.mark_sent()
                     sent_local += 1
+                    if is_group:
+                        self.group_ok += 1
                     errors = bad_peers = 0
                     if config.LOG_STORY_FIRST_SEND and sent_local == 1:
                         log.info(
@@ -1111,6 +1145,8 @@ class Spammer:
                                 f"| story-share | {story.url}"
                             )
                 except StorySendNoMessageError:
+                    if is_group:
+                        self.group_ghost += 1
                     log.warning(
                         f"{sid} | 👻 пустая отправка → {kind_tag} {target.label} "
                         f"(API без message id) | {story.url}"
@@ -1143,6 +1179,8 @@ class Spammer:
                         await asyncio.sleep(pause)
                     continue
                 except (ChatWriteForbiddenError, UserBannedInChannelError, ChatAdminRequiredError) as ue:
+                    if is_group:
+                        self.group_denied += 1
                     log.warning(f"{sid} | ⚠ {target.label}: {humanize(ue)}")
                     if target_id is not None:
                         dead_targets.add(target_id)
@@ -1151,6 +1189,8 @@ class Spammer:
                         await asyncio.sleep(pause)
                     continue
                 except (ChatSendMediaForbiddenError, ChatSendPhotosForbiddenError) as ue:
+                    if is_group:
+                        self.group_denied += 1
                     log.warning(f"{sid} | ⚠ {target.label}: {humanize(ue)}")
                     if target_id is not None:
                         dead_targets.add(target_id)
