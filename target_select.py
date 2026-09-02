@@ -103,6 +103,28 @@ def _group_label(entity) -> str:
     return title or str(getattr(entity, "id", "?"))
 
 
+def _group_members_count(entity) -> int | None:
+    """Число участников, если Telegram отдал в entity (без лишних RPC)."""
+    count = getattr(entity, "participants_count", None)
+    if count is None:
+        return None
+    try:
+        return int(count)
+    except (TypeError, ValueError):
+        return None
+
+
+def _group_eligible(entity) -> bool:
+    """Пропускаем мелкие группы (< GROUP_MIN_MEMBERS). Неизвестный размер — оставляем."""
+    min_n = config.GROUP_MIN_MEMBERS
+    if min_n <= 0:
+        return True
+    count = _group_members_count(entity)
+    if count is None:
+        return True
+    return count >= min_n
+
+
 def target_username(target) -> str | None:
     entity = getattr(target, "entity", None)
     uname = getattr(entity, "username", None) if entity is not None else None
@@ -159,6 +181,8 @@ async def collect_targets(
             if entity is None:
                 continue
             if dialog.is_group:
+                if not _group_eligible(entity):
+                    continue
                 targets.append(Target(entity, "group", 400, _group_label(entity)))
                 continue
             if include_dialogs and dialog.is_user:

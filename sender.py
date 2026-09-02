@@ -341,6 +341,7 @@ class Spammer:
         rng: random.Random,
         fail_counts: dict[tuple[str, int], int] | None = None,
         story_cache: dict | None = None,
+        rr_idx: int | None = None,
     ) -> StoryRef | None:
         fail_counts = fail_counts or {}
         limit = config.STORY_SKIP_AFTER
@@ -353,6 +354,9 @@ class Spammer:
             pool = [s for s in self.stories if not self.is_story_bad(s)]
         if not pool:
             return None
+        pool.sort(key=lambda s: (s.peer.lower(), s.story_id))
+        if len(pool) > 1 and rr_idx is not None:
+            return pool[rr_idx % len(pool)]
         if story_cache and config.STORY_PREFER_CACHED:
             cached_pool = [s for s in pool if s.peer.lower() in story_cache]
             if cached_pool:
@@ -846,6 +850,7 @@ class Spammer:
         peer_flood_total = 0
         skip_users_after_flood = False
         story_fail_counts: dict[tuple[str, int], int] = {}
+        story_rr = 0
 
         await self.warm_story_peers(client, sid, story_cache, joined_keys)
         alive_total = sum(1 for s in self.stories if not self.is_story_bad(s))
@@ -898,13 +903,15 @@ class Spammer:
             kind_tag = "ЛС" if target.kind == "user" else "группа"
 
             try:
-                story = self.pick_story(rng, story_fail_counts, story_cache)
+                story = self.pick_story(rng, story_fail_counts, story_cache, rr_idx=story_rr)
+                story_rr += 1
                 if story is None:
                     if story_fail_counts:
                         story_fail_counts.clear()
                         story_cache.clear()
                         joined_keys.clear()
-                        story = self.pick_story(rng, story_cache=story_cache)
+                        story = self.pick_story(rng, story_cache=story_cache, rr_idx=story_rr)
+                        story_rr += 1
                 if story is None:
                     alive = len(self.stories) - sum(1 for s in self.stories if self.is_story_bad(s))
                     log.error(

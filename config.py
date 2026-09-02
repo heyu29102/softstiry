@@ -143,6 +143,7 @@ LOG_SUCCESS_GROUPS = _env("LOG_SUCCESS_GROUPS", "0").lower() not in ("0", "false
 LOG_SESSION_EVENTS = _env("LOG_SESSION_EVENTS", "0").lower() not in ("0", "false", "no", "")
 DISPATCHER_PROXY_WAIT = _env("DISPATCHER_PROXY_WAIT", "0").lower() not in ("0", "false", "no", "")
 TARGET_GROUPS_FIRST = _env("TARGET_GROUPS_FIRST", "0").lower() not in ("0", "false", "no", "")
+GROUP_MIN_MEMBERS = _int("GROUP_MIN_MEMBERS", 10)
 PEER_FLOOD_SKIP_USERS = _env("PEER_FLOOD_SKIP_USERS", "1").lower() not in ("0", "false", "no", "")
 PEER_FLOOD_ROTATE_AFTER = _int("PEER_FLOOD_ROTATE_AFTER", 6)
 PEER_FLOOD_REST = _int("PEER_FLOOD_REST", 420)
