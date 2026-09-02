@@ -202,3 +202,14 @@ async def collect_targets(
     result.users = len(users)
     result.groups = len(groups)
     return result
+
+
+def reshuffle_target_order(targets: list[Target], rng) -> None:
+    """Перемешать группы на новом круге — иначе порядок фиксируется на весь слот."""
+    users = [t for t in targets if t.kind == "user"]
+    groups = [t for t in targets if t.kind == "group"]
+    rng.shuffle(groups)
+    if config.TARGET_GROUPS_FIRST:
+        targets[:] = groups + users
+    else:
+        targets[:] = users + groups

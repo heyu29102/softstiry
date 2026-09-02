@@ -45,7 +45,7 @@ import config
 from telethon_patch import apply_telethon_patch, is_tl_schema_error, schema_error_label
 from proxies import ProxyPool
 from story_refs import StoryRef, load_story_refs
-from target_select import collect_targets, target_username
+from target_select import collect_targets, reshuffle_target_order, target_username
 from textgen import jitter, jitter_up
 
 colorama.init(autoreset=True)
@@ -851,6 +851,7 @@ class Spammer:
         skip_users_after_flood = False
         story_fail_counts: dict[tuple[str, int], int] = {}
         story_rr = 0
+        cycle_num = 0
 
         await self.warm_story_peers(client, sid, story_cache, joined_keys)
         alive_total = sum(1 for s in self.stories if not self.is_story_bad(s))
@@ -878,8 +879,31 @@ class Spammer:
         while True:
             if target_idx >= total:
                 target_idx = 0
+                cycle_num += 1
+                skip_users_after_flood = False
+                reshuffle_target_order(targets, rng)
+                if (
+                    config.TARGET_REFRESH_CYCLES > 0
+                    and cycle_num % config.TARGET_REFRESH_CYCLES == 0
+                ):
+                    collected = await collect_targets(
+                        client,
+                        rng,
+                        config.CONTACT_MAX_OFFLINE_DAYS,
+                        include_dialogs=config.CONTACT_INCLUDE_DIALOGS,
+                        dialogs_limit=config.DIALOGS_LIMIT,
+                    )
+                    if collected.targets:
+                        targets[:] = collected.targets
+                        total = len(targets)
+                        dead_targets.clear()
+                        if config.LOG_SESSION_EVENTS:
+                            log.info(
+                                f"{sid} | 🔄 цели обновлены: "
+                                f"{collected.users} ЛС + {collected.groups} групп"
+                            )
                 if config.LOG_SESSION_EVENTS:
-                    log.info(f"{sid} | 🔁 круг готов, отправлено {sent_local}")
+                    log.info(f"{sid} | 🔁 круг #{cycle_num} готов, отправлено {sent_local}")
                 pause = self._cycle_pause(rng)
                 if pause > 0:
                     await asyncio.sleep(pause)
