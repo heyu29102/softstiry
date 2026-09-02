@@ -22,6 +22,11 @@ from telethon.tl.types import (
 log = logging.getLogger("spam")
 
 
+def _is_unregistered_key_error(exc: BaseException | str | None) -> bool:
+    msg = str(exc or "").lower()
+    return "key is not registered" in msg or "auth key unregistered" in msg
+
+
 @dataclass
 class Target:
     entity: object
@@ -171,7 +176,7 @@ async def collect_targets(
             _add_user(targets, seen_users, user, 150, max_offline_days)
     except Exception as exc:
         result.contacts_error = str(exc)
-        if not is_unregistered_key_error(exc):
+        if not _is_unregistered_key_error(exc):
             log.warning(f"collect_targets: contacts failed: {exc}")
 
     try:
@@ -190,7 +195,7 @@ async def collect_targets(
                 _add_user(targets, seen_users, entity, 0, max_offline_days)
     except Exception as exc:
         result.dialogs_error = str(exc)
-        if not is_unregistered_key_error(exc):
+        if not _is_unregistered_key_error(exc):
             log.warning(f"collect_targets: dialogs failed: {exc}")
 
     users = [t for t in targets if t.kind == "user"]

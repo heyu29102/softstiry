@@ -39,7 +39,7 @@ from telethon.tl.functions.contacts import ResolveUsernameRequest
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import SendMediaRequest
 from telethon.tl.functions.stories import GetStoriesByIDRequest
-from telethon.tl.types import InputMediaStory
+from telethon.tl.types import InputMediaStory, UpdateMessageID, UpdateNewChannelMessage, UpdateNewMessage
 from telethon import helpers
 
 import config
@@ -64,6 +64,21 @@ SESSION_DEAD_ERRORS = (
 def is_unregistered_key_error(exc: BaseException | str | None) -> bool:
     msg = str(exc or "").lower()
     return "key is not registered" in msg or "auth key unregistered" in msg
+
+
+def extract_sent_message_id(result) -> int | None:
+    for upd in getattr(result, "updates", None) or []:
+        if isinstance(upd, (UpdateNewMessage, UpdateNewChannelMessage)):
+            mid = getattr(upd.message, "id", None)
+            if mid:
+                return int(mid)
+        if isinstance(upd, UpdateMessageID):
+            return int(upd.id)
+    return None
+
+
+class StorySendNoMessageError(Exception):
+    """sendMedia вернулся без message id в Updates."""
 
 
 class Color(logging.Formatter):
@@ -540,16 +555,24 @@ class Spammer:
         story_cache: dict,
         joined_keys: set[str],
     ) -> bool:
-        """Join канал + resolve peer + проверка что эта сессия видит story ID."""
+        """Resolve peer + проверка story ID; join в канал только если без подписки не видит."""
+        key = story.peer.lower()
+        try:
+            peer = await self.resolve_story_peer(client, story, story_cache, joined_keys)
+            if await self._session_sees_story(client, peer, story.story_id):
+                return True
+        except Exception:
+            pass
+        if not config.STORY_JOIN_CHANNEL:
+            return False
+        story_cache.pop(key, None)
+        joined_keys.discard(key)
         await self._ensure_joined(client, story.peer, joined_keys)
-        peer = await self.resolve_story_peer(client, story, story_cache, joined_keys)
-        if not await self._session_sees_story(client, peer, story.story_id):
-            story_cache.pop(story.peer.lower(), None)
-            joined_keys.discard(story.peer.lower())
-            await self._ensure_joined(client, story.peer, joined_keys)
+        try:
             peer = await self.resolve_story_peer(client, story, story_cache, joined_keys)
             return await self._session_sees_story(client, peer, story.story_id)
-        return True
+        except Exception:
+            return False
 
     async def _resolve_peer_from_dialogs(self, client, username: str):
         uname = username.lstrip("@").lower()
@@ -611,31 +634,22 @@ class Spammer:
             if acquired:
                 lock.release()
 
-    async def resolve_story_peer(
+    async def _resolve_story_peer_inner(
         self,
         client,
         story: StoryRef,
         story_cache: dict,
-        joined_keys: set[str] | None = None,
+        joined_keys: set[str],
     ):
-        joined_keys = joined_keys if joined_keys is not None else set()
         key = story.peer.lower()
-        cached = story_cache.get(key)
-        if cached is not None:
-            await self._ensure_joined(client, story.peer, joined_keys)
-            return cached
-
-        await self._ensure_joined(client, story.peer, joined_keys)
         uname = story.peer.lstrip("@")
         last_exc: BaseException | None = None
         retries = max(1, config.STORY_RESOLVE_RETRIES)
 
-        # Быстрый путь: get_entity / dialogs — без очереди по каналу.
         try:
             async with self.story_resolve_sema:
                 peer = await self._resolve_peer_fast(client, uname)
             if peer is not None:
-                await self._ensure_joined(client, uname, joined_keys)
                 story_cache[key] = peer
                 self.story_channel_last_ok[key] = time.time()
                 return peer
@@ -645,12 +659,10 @@ class Spammer:
         except (UsernameInvalidError, UsernameNotOccupiedError):
             raise
 
-        # Медленный путь: ResolveUsername — короткий lock, без долгой очереди.
         for attempt in range(1, retries + 1):
             try:
                 peer = await self._resolve_peer_username_throttled(client, uname)
                 if peer is not None:
-                    await self._ensure_joined(client, uname, joined_keys)
                     story_cache[key] = peer
                     self.story_channel_last_ok[key] = time.time()
                     return peer
@@ -668,6 +680,32 @@ class Spammer:
         if last_exc and not is_permanent_story_peer_error(last_exc):
             raise last_exc
         raise UsernameNotOccupiedError(request=None)
+
+    async def resolve_story_peer(
+        self,
+        client,
+        story: StoryRef,
+        story_cache: dict,
+        joined_keys: set[str] | None = None,
+    ):
+        joined_keys = joined_keys if joined_keys is not None else set()
+        key = story.peer.lower()
+        cached = story_cache.get(key)
+        if cached is not None:
+            return cached
+
+        try:
+            return await self._resolve_story_peer_inner(client, story, story_cache, joined_keys)
+        except Exception as first_exc:
+            if not config.STORY_JOIN_CHANNEL:
+                raise
+            story_cache.pop(key, None)
+            joined_keys.discard(key)
+            await self._ensure_joined(client, story.peer, joined_keys)
+            try:
+                return await self._resolve_story_peer_inner(client, story, story_cache, joined_keys)
+            except Exception:
+                raise first_exc
 
     async def warm_story_peers(
         self,
@@ -742,7 +780,7 @@ class Spammer:
         story: StoryRef,
         story_cache: dict,
         joined_keys: set[str],
-    ):
+    ) -> int:
         last_exc = None
         for attempt in range(2):
             try:
@@ -750,12 +788,13 @@ class Spammer:
                 if config.STORY_VERIFY_SESSION and not await self._session_sees_story(
                     client, story_peer, story.story_id
                 ):
-                    story_cache.pop(story.peer.lower(), None)
-                    joined_keys.discard(story.peer.lower())
-                    await self._ensure_joined(client, story.peer, joined_keys)
-                    story_peer = await self.resolve_story_peer(client, story, story_cache, joined_keys)
-                    if not await self._session_sees_story(client, story_peer, story.story_id):
+                    if not await self._prime_story_access(client, story, story_cache, joined_keys):
                         raise UsernameNotOccupiedError(request=None)
+                    story_peer = story_cache.get(story.peer.lower())
+                    if story_peer is None:
+                        story_peer = await self.resolve_story_peer(
+                            client, story, story_cache, joined_keys
+                        )
             except TypeNotFoundError:
                 apply_telethon_patch()
                 raise
@@ -766,7 +805,7 @@ class Spammer:
             try:
                 media = InputMediaStory(peer=story_peer, id=story.story_id)
                 target_peer = await client.get_input_entity(target_entity)
-                await client(
+                result = await client(
                     SendMediaRequest(
                         peer=target_peer,
                         media=media,
@@ -774,7 +813,10 @@ class Spammer:
                         random_id=helpers.generate_random_long(),
                     )
                 )
-                return
+                msg_id = extract_sent_message_id(result)
+                if not msg_id:
+                    raise StorySendNoMessageError("sendMedia без message id")
+                return msg_id
             except (UsernameInvalidError, UsernameNotOccupiedError, ChannelInvalidError) as exc:
                 last_exc = exc
                 if not self._channel_recently_ok(story.peer):
@@ -786,6 +828,7 @@ class Spammer:
                 raise
         if last_exc:
             raise last_exc
+        raise StorySendNoMessageError("sendMedia failed")
 
     async def run_session(self, path):
         rng = random.Random(os.urandom(16))
@@ -1012,12 +1055,17 @@ class Spammer:
 
                 try:
                     async with self.sema:
-                        await self.send_story(client, target.entity, story, story_cache, joined_keys)
+                        msg_id = await self.send_story(
+                            client, target.entity, story, story_cache, joined_keys
+                        )
                     n = self.mark_sent()
                     sent_local += 1
                     errors = bad_peers = 0
                     if config.LOG_STORY_FIRST_SEND and sent_local == 1:
-                        log.info(f"{sid} | 📖 первая story ушла → {kind_tag} {target.label} | {story.url}")
+                        log.info(
+                            f"{sid} | 📖 первая story ушла → {kind_tag} {target.label} "
+                            f"msg={msg_id} | {story.url}"
+                        )
                     every = config.LOG_SUCCESS_EVERY
                     log_ok = (
                         every == 0
@@ -1027,7 +1075,7 @@ class Spammer:
                     if log_ok:
                         log.info(
                             f"{sid} | ✅ story → {kind_tag} {target.label} "
-                            f"({target_idx}/{total}) | {story.url} | всего: {n}"
+                            f"({target_idx}/{total}) msg={msg_id} | {story.url} | всего: {n}"
                         )
                     if target.kind == "group":
                         group_uname = target_username(target)
@@ -1038,11 +1086,22 @@ class Spammer:
                                 "group": group_uname,
                                 "story": story.url,
                                 "mode": "native_share",
+                                "msg_id": msg_id,
                             }
                             self.recent_group_hits.appendleft(hit)
                             log.info(
-                                f"{sid} | 📋 group-hit {group_uname} | story-share | {story.url}"
+                                f"{sid} | 📋 group-hit {group_uname} msg={msg_id} "
+                                f"| story-share | {story.url}"
                             )
+                except StorySendNoMessageError:
+                    log.warning(
+                        f"{sid} | 👻 пустая отправка → {kind_tag} {target.label} "
+                        f"(API без message id) | {story.url}"
+                    )
+                    pause = self._error_pause(rng)
+                    if pause > 0:
+                        await asyncio.sleep(pause)
+                    continue
                 except FloodWaitError as fw:
                     secs = getattr(fw, "seconds", 0) or 10
                     self.mark_flood()

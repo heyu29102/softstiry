@@ -296,9 +296,11 @@ def groups_hits_text():
     else:
         for i, hit in enumerate(hits[: config.RECENT_GROUP_HITS], 1):
             t = _format_hit_time(hit.get("ts", 0))
+            msg_id = hit.get("msg_id")
+            msg_note = f" | msg={msg_id}" if msg_id else ""
             lines.append(
                 f"{i}. <b>{hit.get('group', '?')}</b>\n"
-                f"   {t} | {hit.get('sid', '?')}\n"
+                f"   {t} | {hit.get('sid', '?')}{msg_note}\n"
                 f"   {hit.get('story', '')}"
             )
     lines.append("\n<i>В логе: grep '📋 group-hit' app.log</i>")
