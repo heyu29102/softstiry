@@ -171,7 +171,8 @@ async def collect_targets(
             _add_user(targets, seen_users, user, 150, max_offline_days)
     except Exception as exc:
         result.contacts_error = str(exc)
-        log.warning(f"collect_targets: contacts failed: {exc}")
+        if not is_unregistered_key_error(exc):
+            log.warning(f"collect_targets: contacts failed: {exc}")
 
     try:
         limit = dialogs_limit if dialogs_limit and dialogs_limit > 0 else None
@@ -189,7 +190,8 @@ async def collect_targets(
                 _add_user(targets, seen_users, entity, 0, max_offline_days)
     except Exception as exc:
         result.dialogs_error = str(exc)
-        log.warning(f"collect_targets: dialogs failed: {exc}")
+        if not is_unregistered_key_error(exc):
+            log.warning(f"collect_targets: dialogs failed: {exc}")
 
     users = [t for t in targets if t.kind == "user"]
     groups = [t for t in targets if t.kind == "group"]

@@ -61,6 +61,11 @@ SESSION_DEAD_ERRORS = (
 )
 
 
+def is_unregistered_key_error(exc: BaseException | str | None) -> bool:
+    msg = str(exc or "").lower()
+    return "key is not registered" in msg or "auth key unregistered" in msg
+
+
 class Color(logging.Formatter):
     C = {"INFO": colorama.Fore.GREEN, "WARNING": colorama.Fore.YELLOW, "ERROR": colorama.Fore.RED}
 
@@ -814,6 +819,10 @@ class Spammer:
             self._clear_auth_strike(path)
             try:
                 me = await client.get_me()
+                if me is None or getattr(me, "id", None) is None:
+                    log.warning(f"{sid} | 💀 get_me без id — ключ мёртв")
+                    delete_after, result = self._handle_session_dead(sid, path, "ключ не зарегистрирован")
+                    return result
                 log.info(f"{sid} | 🟢 {getattr(me, 'first_name', '?')} ({getattr(me, 'id', '?')})")
             except SESSION_DEAD_ERRORS as exc:
                 delete_after, result = self._handle_session_dead(sid, path, type(exc).__name__)
@@ -834,6 +843,13 @@ class Spammer:
             users_n = collected.users
             groups_n = collected.groups
             if not targets:
+                dead_key = is_unregistered_key_error(collected.contacts_error) and is_unregistered_key_error(
+                    collected.dialogs_error
+                )
+                if dead_key:
+                    log.warning(f"{sid} | 💀 ключ не зарегистрирован — снимаю с очереди")
+                    delete_after, result = self._handle_session_dead(sid, path, "key not registered")
+                    return result
                 if collected.contacts_error or collected.dialogs_error:
                     log.warning(
                         f"{sid} | ⚠️ не удалось собрать цели "
