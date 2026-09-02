@@ -69,6 +69,19 @@ class Color(logging.Formatter):
 
 def setup_logger():
     log = logging.getLogger("spam")
+    log.setLevel(logging.INFO)
+    if log.handlers:
+        return log
+    fmt, datefmt = "[%(asctime)s] %(message)s", "%H:%M:%S"
+    fh = RotatingFileHandler(str(config.APP_LOG), maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    fh.setFormatter(logging.Formatter(fmt, datefmt))
+    log.addHandler(fh)
+    # stdout панели тоже пишет в app.log — без TTY не дублируем в файл.
+    if sys.stdout.isatty():
+        sh = logging.StreamHandler(sys.stdout)
+        sh.setFormatter(Color(fmt, datefmt))
+        log.addHandler(sh)
+    return log
 
 
 class StorySendGhostError(Exception):
@@ -97,19 +110,6 @@ def _verify_send_media_result(result, story: StoryRef) -> int:
     if not msg_id:
         raise StorySendGhostError("sendMedia: нет message id в Updates")
     return msg_id
-    log.setLevel(logging.INFO)
-    if log.handlers:
-        return log
-    fmt, datefmt = "[%(asctime)s] %(message)s", "%H:%M:%S"
-    fh = RotatingFileHandler(str(config.APP_LOG), maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
-    fh.setFormatter(logging.Formatter(fmt, datefmt))
-    log.addHandler(fh)
-    # stdout панели тоже пишет в app.log — без TTY не дублируем в файл.
-    if sys.stdout.isatty():
-        sh = logging.StreamHandler(sys.stdout)
-        sh.setFormatter(Color(fmt, datefmt))
-        log.addHandler(sh)
-    return log
 
 
 log = setup_logger()
