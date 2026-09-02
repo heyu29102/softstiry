@@ -38,6 +38,7 @@ from telethon.tl import functions
 from telethon.tl.functions.contacts import ResolveUsernameRequest
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import SendMediaRequest
+from telethon.tl.functions.stories import GetStoriesByIDRequest
 from telethon.tl.types import InputMediaStory
 from telethon import helpers
 
@@ -503,12 +504,47 @@ class Spammer:
         key = username.lstrip("@").lower()
         if key in joined_keys:
             return
+        uname = username.lstrip("@")
         try:
-            entity = await client.get_entity(username.lstrip("@"))
+            entity = await client.get_entity(uname)
             await client(JoinChannelRequest(entity))
             joined_keys.add(key)
+        except Exception as exc:
+            if config.LOG_STORY_EVENTS:
+                log.warning(f"📖 join @{uname}: {type(exc).__name__}")
+
+    async def _session_sees_story(self, client, story_peer, story_id: int) -> bool:
+        if not config.STORY_VERIFY_SESSION:
+            return True
+        try:
+            result = await client(GetStoriesByIDRequest(peer=story_peer, id=[story_id]))
+            items = getattr(result, "stories", None) or []
+            return any(getattr(item, "id", None) == story_id for item in items)
+        except RPCError as exc:
+            msg = (getattr(exc, "message", "") or str(exc)).upper()
+            if "STORY_ID_INVALID" in msg or "STORY_NOT_FOUND" in msg:
+                return False
+            return True
         except Exception:
-            pass
+            return True
+
+    async def _prime_story_access(
+        self,
+        client,
+        story: StoryRef,
+        story_cache: dict,
+        joined_keys: set[str],
+    ) -> bool:
+        """Join канал + resolve peer + проверка что эта сессия видит story ID."""
+        await self._ensure_joined(client, story.peer, joined_keys)
+        peer = await self.resolve_story_peer(client, story, story_cache, joined_keys)
+        if not await self._session_sees_story(client, peer, story.story_id):
+            story_cache.pop(story.peer.lower(), None)
+            joined_keys.discard(story.peer.lower())
+            await self._ensure_joined(client, story.peer, joined_keys)
+            peer = await self.resolve_story_peer(client, story, story_cache, joined_keys)
+            return await self._session_sees_story(client, peer, story.story_id)
+        return True
 
     async def _resolve_peer_from_dialogs(self, client, username: str):
         uname = username.lstrip("@").lower()
@@ -584,6 +620,7 @@ class Spammer:
             await self._ensure_joined(client, story.peer, joined_keys)
             return cached
 
+        await self._ensure_joined(client, story.peer, joined_keys)
         uname = story.peer.lstrip("@")
         last_exc: BaseException | None = None
         retries = max(1, config.STORY_RESOLVE_RETRIES)
@@ -612,8 +649,6 @@ class Spammer:
                     story_cache[key] = peer
                     self.story_channel_last_ok[key] = time.time()
                     return peer
-                # Lock занят — другая сессия уже резолвит; не стопорим пайплайн.
-                break
             except FloodWaitError as exc:
                 last_exc = exc
                 await asyncio.sleep(min(getattr(exc, "seconds", 5) or 5, 60))
@@ -636,25 +671,31 @@ class Spammer:
         story_cache: dict,
         joined_keys: set[str],
     ) -> int:
-        """Перед рассылкой: каждый аккаунт резолвит stories (full) или при первой отправке (lazy)."""
-        mode = config.STORY_WARM_MODE
-        if not config.STORY_WARM_ON_START or mode == "lazy":
+        """Перед рассылкой: join + resolve stories для этой сессии."""
+        if not config.STORY_WARM_ON_START:
             return 0
+        mode = config.STORY_WARM_MODE
         if config.STORY_WARM_STAGGER_MAX > 0:
             await asyncio.sleep(random.uniform(0, config.STORY_WARM_STAGGER_MAX))
         pending = [s for s in self.stories if not self.is_story_bad(s)]
         if not pending:
             return 0
 
-        passes = max(1, config.STORY_WARM_PASSES)
+        passes = 1 if mode == "lazy" else max(1, config.STORY_WARM_PASSES)
         for pass_n in range(1, passes + 1):
             still_pending = []
             for story in pending:
                 key = story.peer.lower()
                 if key in story_cache:
-                    continue
+                    peer = story_cache[key]
+                    if await self._session_sees_story(client, peer, story.story_id):
+                        continue
+                    story_cache.pop(key, None)
+                    joined_keys.discard(key)
                 try:
-                    await self.resolve_story_peer(client, story, story_cache, joined_keys)
+                    ok = await self._prime_story_access(client, story, story_cache, joined_keys)
+                    if not ok:
+                        still_pending.append(story)
                 except Exception as exc:
                     still_pending.append(story)
                     if pass_n == passes:
@@ -701,6 +742,15 @@ class Spammer:
         for attempt in range(2):
             try:
                 story_peer = await self.resolve_story_peer(client, story, story_cache, joined_keys)
+                if config.STORY_VERIFY_SESSION and not await self._session_sees_story(
+                    client, story_peer, story.story_id
+                ):
+                    story_cache.pop(story.peer.lower(), None)
+                    joined_keys.discard(story.peer.lower())
+                    await self._ensure_joined(client, story.peer, joined_keys)
+                    story_peer = await self.resolve_story_peer(client, story, story_cache, joined_keys)
+                    if not await self._session_sees_story(client, story_peer, story.story_id):
+                        raise UsernameNotOccupiedError(request=None)
             except TypeNotFoundError:
                 apply_telethon_patch()
                 raise
@@ -855,7 +905,7 @@ class Spammer:
 
         await self.warm_story_peers(client, sid, story_cache, joined_keys)
         alive_total = sum(1 for s in self.stories if not self.is_story_bad(s))
-        if alive_total and len(story_cache) == 0:
+        if alive_total and len(story_cache) == 0 and config.STORY_WARM_MODE != "lazy":
             log.warning(f"{sid} | 📖 повторный warm — первая попытка 0/{alive_total}")
             await asyncio.sleep(2.0)
             await self.warm_story_peers(client, sid, story_cache, joined_keys)
