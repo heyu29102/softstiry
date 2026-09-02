@@ -1130,20 +1130,20 @@ class Spammer:
                         )
                     if target.kind == "group":
                         group_uname = target_username(target)
-                        if group_uname:
-                            hit = {
-                                "ts": int(time.time()),
-                                "sid": sid,
-                                "group": group_uname,
-                                "story": story.url,
-                                "mode": "native_share",
-                                "msg_id": msg_id,
-                            }
-                            self.recent_group_hits.appendleft(hit)
-                            log.info(
-                                f"{sid} | 📋 group-hit {group_uname} msg={msg_id} "
-                                f"| story-share | {story.url}"
-                            )
+                        group_label = group_uname or target.label
+                        hit = {
+                            "ts": int(time.time()),
+                            "sid": sid,
+                            "group": group_label,
+                            "story": story.url,
+                            "mode": "native_share",
+                            "msg_id": msg_id,
+                        }
+                        self.recent_group_hits.appendleft(hit)
+                        log.info(
+                            f"{sid} | 📋 group-hit {group_label} msg={msg_id} "
+                            f"| story-share | {story.url}"
+                        )
                 except StorySendNoMessageError:
                     if is_group:
                         self.group_ghost += 1

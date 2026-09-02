@@ -101,11 +101,55 @@ def _user_label(user) -> str:
     return str(getattr(user, "id", "?"))
 
 
+def _entity_public_username(entity) -> str | None:
+    """Публичный @username с entity (включая usernames[])."""
+    uname = getattr(entity, "username", None)
+    if uname:
+        return str(uname).lstrip("@")
+    for item in getattr(entity, "usernames", None) or []:
+        u = getattr(item, "username", None)
+        if not u:
+            continue
+        if getattr(item, "active", True):
+            return str(u).lstrip("@")
+    return None
+
+
+def _group_may_have_username(entity) -> bool:
+    """Базовый Chat без username никогда; supergroup/channel — может."""
+    from telethon.tl.types import Channel
+
+    if isinstance(entity, Channel):
+        return bool(getattr(entity, "megagroup", False) or getattr(entity, "broadcast", False))
+    return getattr(entity, "megagroup", False)
+
+
 def _group_label(entity) -> str:
-    if getattr(entity, "username", None):
-        return f"@{entity.username}"
+    uname = _entity_public_username(entity)
+    if uname:
+        return f"@{uname}"
     title = getattr(entity, "title", None)
     return title or str(getattr(entity, "id", "?"))
+
+
+async def _group_target_entity(client, entity):
+    """Диалоги часто без username — дотягиваем через get_entity для supergroup."""
+    if _entity_public_username(entity):
+        return entity
+    if not _group_may_have_username(entity):
+        return entity
+    try:
+        refreshed = await client.get_entity(entity)
+        if _entity_public_username(refreshed):
+            return refreshed
+    except Exception:
+        pass
+    return entity
+
+
+async def _group_label_resolved(client, entity) -> tuple[object, str]:
+    entity = await _group_target_entity(client, entity)
+    return entity, _group_label(entity)
 
 
 def _group_members_count(entity) -> int | None:
@@ -132,9 +176,9 @@ def _group_eligible(entity) -> bool:
 
 def target_username(target) -> str | None:
     entity = getattr(target, "entity", None)
-    uname = getattr(entity, "username", None) if entity is not None else None
+    uname = _entity_public_username(entity) if entity is not None else None
     if uname:
-        return f"@{uname}" if not str(uname).startswith("@") else str(uname)
+        return f"@{uname}"
     label = (getattr(target, "label", "") or "").strip()
     if label.startswith("@"):
         return label.split()[0]
@@ -189,7 +233,8 @@ async def collect_targets(
             if dialog.is_group:
                 if not _group_eligible(entity):
                     continue
-                targets.append(Target(entity, "group", 400, _group_label(entity)))
+                entity, label = await _group_label_resolved(client, entity)
+                targets.append(Target(entity, "group", 400, label))
                 continue
             if include_dialogs and dialog.is_user:
                 _add_user(targets, seen_users, entity, 0, max_offline_days)
