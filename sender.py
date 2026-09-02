@@ -533,6 +533,17 @@ class Spammer:
             if config.LOG_STORY_EVENTS:
                 log.warning(f"📖 join @{uname}: {type(exc).__name__}")
 
+    async def _confirm_sent_message(self, client, target_entity, msg_id: int) -> bool:
+        try:
+            msg = await client.get_messages(target_entity, ids=msg_id)
+            if msg is None:
+                return False
+            if isinstance(msg, (list, tuple)):
+                msg = msg[0] if msg else None
+            return bool(msg) and int(getattr(msg, "id", 0) or 0) == int(msg_id)
+        except Exception:
+            return False
+
     async def _session_sees_story(self, client, story_peer, story_id: int) -> bool:
         if not config.STORY_VERIFY_SESSION:
             return True
@@ -1057,6 +1068,12 @@ class Spammer:
                     async with self.sema:
                         msg_id = await self.send_story(
                             client, target.entity, story, story_cache, joined_keys
+                        )
+                    if config.STORY_CONFIRM_IN_CHAT and not await self._confirm_sent_message(
+                        client, target.entity, msg_id
+                    ):
+                        raise StorySendNoMessageError(
+                            f"msg {msg_id} не найден в чате после sendMedia"
                         )
                     n = self.mark_sent()
                     sent_local += 1

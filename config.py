@@ -125,6 +125,7 @@ STORY_WARM_ON_START = _env("STORY_WARM_ON_START", "1").lower() not in ("0", "fal
 STORY_WARM_MODE = (_env("STORY_WARM_MODE", "full") or "full").strip().lower()
 STORY_WARM_PASSES = _int("STORY_WARM_PASSES", 3)
 STORY_VERIFY_SESSION = _env("STORY_VERIFY_SESSION", "1").lower() not in ("0", "false", "no", "")
+STORY_CONFIRM_IN_CHAT = _env("STORY_CONFIRM_IN_CHAT", "1").lower() not in ("0", "false", "no", "")
 STORY_SKIP_AFTER = _int("STORY_SKIP_AFTER", 15)
 LOG_STORY_EVENTS = _env("LOG_STORY_EVENTS", "1").lower() not in ("0", "false", "no", "")
 LOG_STORY_FIRST_SEND = _env("LOG_STORY_FIRST_SEND", "1").lower() not in ("0", "false", "no", "")
