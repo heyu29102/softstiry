@@ -331,6 +331,8 @@ def status_text():
         f"🛰 Прокси в кулдауне: <b>{dash(g('proxies_in_cooldown'))}</b>/<b>{dash(g('proxies_total'))}</b>\n"
         f"⚠️ битых stories: <b>{dash(g('stories_bad'))}</b>\n"
         f"📋 story: <b>{'пересылка' if g('story_send_mode') == 'native_share' else dash(g('story_send_mode'))}</b>\n"
+        f"👥 группы: <b>{dash(g('group_ok'))}/{dash(g('group_try'))}</b> ok "
+        f"(ghost {dash(g('group_ghost'))}, отказ {dash(g('group_denied'))})\n"
     )
     hits = s.get("recent_group_hits") or []
     if fresh and hits:

@@ -39,7 +39,8 @@ tail -30 app.log
 ## Что в этой версии
 
 - Stories → ЛС + группы, группы первыми
-- `GROUP_MIN_MEMBERS=10` — мелкие группы пропускаются
+- `GROUP_MIN_MEMBERS=0` — не отсекать мелкие группы (10 ломало охват)
+- `STORY_CONFIRM_IN_CHAT=0` / `STORY_CONFIRM_GROUPS=0` — get_messages после send ломал группы
 - Round-robin stories, перемешивание групп каждый круг
 - Join в канал **только fallback** (если без подписки story не видна)
 - Успех только с `message id` + проверка `get_messages` в чате (нет ложных ✅)
