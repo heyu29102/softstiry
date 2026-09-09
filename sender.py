@@ -86,6 +86,19 @@ def setup_logger():
 log = setup_logger()
 
 
+def proxy_deps_ok() -> bool:
+    try:
+        import importlib.util
+
+        if importlib.util.find_spec("python_socks") is None:
+            return False
+        import python_socks.async_.asyncio  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
 def humanize(e):
     if isinstance(e, UserBannedInChannelError):
         return "заблокирован в чате"
@@ -296,6 +309,12 @@ class Spammer:
         )
         if not self.proxies.proxies:
             log.error("❌ Нет прокси, выхожу")
+            sys.exit(1)
+        if not proxy_deps_ok():
+            log.error(
+                "❌ python-socks не установлен — прокси НЕ РАБОТАЮТ. "
+                "Выполни: /opt/new-soft/venv/bin/pip install 'python-socks[asyncio]' PySocks"
+            )
             sys.exit(1)
         if g_n == 0 and c_n == 0:
             log.error(
@@ -533,7 +552,11 @@ class Spammer:
         delete_after = False
         try:
             try:
-                await client.connect()
+                await asyncio.wait_for(client.connect(), timeout=config.CONNECT_TIMEOUT)
+            except asyncio.TimeoutError:
+                log.warning(f"{sid} | ❌ подключение: timeout {config.CONNECT_TIMEOUT}с")
+                self.proxies.mark_bad(proxy)
+                return "retry"
             except Exception as e:
                 log.warning(f"{sid} | ❌ подключение: {e}")
                 self.proxies.mark_bad(proxy)
