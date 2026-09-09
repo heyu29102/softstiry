@@ -80,5 +80,16 @@ class ProxyPool:
         now = time.time()
         return any(p["bad_until"] <= now for p in self.proxies)
 
+    def decay_cooldowns(self, seconds: float = 30.0):
+        """Ускорить выход прокси из кулдауна (maintenance)."""
+        now = time.time()
+        for p in self.proxies:
+            if p["bad_until"] > now:
+                p["bad_until"] = max(now, p["bad_until"] - seconds)
+
+    def reset_cooldowns(self):
+        for p in self.proxies:
+            p["bad_until"] = 0.0
+
     def to_dict(self, p):
         return {k: p[k] for k in ("proxy_type", "addr", "port", "username", "password")}

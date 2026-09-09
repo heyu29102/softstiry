@@ -136,6 +136,12 @@ def is_story_id_invalid_error(e) -> bool:
     return "STORY_ID_INVALID" in msg
 
 
+def is_local_resource_error(e) -> bool:
+    """Errno 24 и т.п. — вина сервера, не прокси."""
+    msg = (str(e) or "").lower()
+    return "too many open files" in msg or "errno 24" in msg
+
+
 def delete_session_files(path):
     try:
         for t in (path, path + ".journal", path + "-journal", os.path.splitext(path)[0] + ".json"):
@@ -430,6 +436,18 @@ class Spammer:
                 f"ЛС {c} (бит {len(self.global_bad[self.KIND_CONTACT])})"
             )
 
+    async def maintenance_loop(self):
+        while not self.stop.is_set():
+            await asyncio.sleep(60)
+            try:
+                self.proxies.decay_cooldowns(30)
+                cool = self.proxies.cooldown_count()
+                if cool >= len(self.proxies) * 0.9 and cool > 0:
+                    log.warning(f"🧹 прокси в кулдауне {cool}/{len(self.proxies)} — ускоряю decay")
+                    self.proxies.decay_cooldowns(60)
+            except Exception:
+                pass
+
     async def reload_stories_loop(self):
         while not self.stop.is_set():
             await asyncio.sleep(config.STORIES_RELOAD_INTERVAL)
@@ -586,7 +604,8 @@ class Spammer:
                 return "retry"
             except Exception as e:
                 log.warning(f"{sid} | ❌ подключение: {e}")
-                self.proxies.mark_bad(proxy)
+                if not is_local_resource_error(e):
+                    self.proxies.mark_bad(proxy)
                 return "retry"
             try:
                 if not await client.is_user_authorized():
