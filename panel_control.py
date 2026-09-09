@@ -183,6 +183,8 @@ def start_app():
     if app_running():
         return "Уже запущен."
 
+    config.raise_nofile_limit()
+
     try:
         log_fh = _open_app_log_for_subprocess()
         proc = subprocess.Popen(

@@ -30,6 +30,9 @@ def lock_instance():
 
 def main():
     global _lock
+    nofile = config.raise_nofile_limit()
+    if nofile > 0:
+        print(f"[app] nofile limit: {nofile}", flush=True)
     if os.name == "nt":
         try:
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

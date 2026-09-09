@@ -103,6 +103,8 @@ AUTO_SERVICE = _env("AUTO_SERVICE", "bridge.service")
 # --- рассылка (stories) ---
 MAX_SESSIONS = _int("MAX_SESSIONS", 500)
 MAX_CONCURRENT = _int("MAX_CONCURRENT", 200)
+# Одновременных TCP-подключений к Telegram (защита от Errno 24 Too many open files)
+MAX_CONNECT_PARALLEL = _int("MAX_CONNECT_PARALLEL", 80)
 REFRESH_INTERVAL = _int("REFRESH_INTERVAL", 120)
 DELAY_MESSAGES = _float("DELAY_MESSAGES", 1.0)
 DELAY_CYCLES = _float("DELAY_CYCLES", 10)
@@ -152,6 +154,32 @@ def load_stories_pool(kind: str):
         return refs, path
     legacy = load_story_refs(STORIES_FILE)
     return legacy, STORIES_FILE
+
+
+def raise_nofile_limit(target: int = 1048576) -> int:
+    """Поднять ulimit -n (Linux). Возвращает текущий soft limit."""
+    if os.name == "nt":
+        return -1
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = min(target, hard if hard > 0 else target)
+        if soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, max(hard, want)))
+            soft = want
+        return soft
+    except Exception:
+        return -1
+
+
+def current_nofile_limit() -> int:
+    try:
+        import resource
+
+        return resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    except Exception:
+        return -1
 
 
 def atomic_write(path, data):

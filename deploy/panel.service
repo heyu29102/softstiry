@@ -6,7 +6,8 @@ After=network.target
 Type=simple
 WorkingDirectory=/opt/new-soft
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 /opt/new-soft/panel.py
+LimitNOFILE=1048576
+ExecStart=/opt/new-soft/venv/bin/python3 /opt/new-soft/panel.py
 Restart=on-failure
 RestartSec=5
 

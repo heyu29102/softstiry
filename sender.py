@@ -166,8 +166,9 @@ class Spammer:
         self.pending = deque()
         self.wake = asyncio.Event()
         self.seen = set()
-        self.slots = asyncio.Semaphore(config.MAX_SESSIONS)
-        self.sema = asyncio.Semaphore(config.MAX_CONCURRENT)
+        self._connect_limit = config.MAX_CONNECT_PARALLEL
+        self.slots = asyncio.Semaphore(self._connect_limit)
+        self.sema = asyncio.Semaphore(min(config.MAX_CONCURRENT, self._connect_limit))
         self.total = 0
         self.total_contacts = 0
         self.total_groups = 0
@@ -298,14 +299,38 @@ class Spammer:
         self._load_pool(self.KIND_GROUP)
         self._load_pool(self.KIND_CONTACT)
 
+    def _compute_connect_limit(self) -> int:
+        cap = min(config.MAX_CONNECT_PARALLEL, config.MAX_SESSIONS)
+        try:
+            import resource
+
+            soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+            if soft > 0:
+                # ~12–15 fd на одну telethon-сессию (сокет, sqlite, proxy)
+                cap = min(cap, max(10, (soft - 400) // 15))
+        except Exception:
+            pass
+        return max(10, cap)
+
+    def _apply_connect_limit(self):
+        limit = self._compute_connect_limit()
+        if limit != self._connect_limit:
+            self._connect_limit = limit
+            self.slots = asyncio.Semaphore(limit)
+            self.sema = asyncio.Semaphore(min(config.MAX_CONCURRENT, limit))
+
     def load(self):
+        config.raise_nofile_limit()
+        self._apply_connect_limit()
         self.proxies = ProxyPool.from_file()
         self.load_stories()
         g_n = len(self.story_pools[self.KIND_GROUP])
         c_n = len(self.story_pools[self.KIND_CONTACT])
+        nofile = config.current_nofile_limit()
         log.info(
             f"📖 историй: группы {g_n} | контакты {c_n} | "
-            f"🛰 прокси: {len(self.proxies)} | оффлайн лимит: {config.CONTACT_MAX_OFFLINE_DAYS}д"
+            f"🛰 прокси: {len(self.proxies)} | оффлайн лимит: {config.CONTACT_MAX_OFFLINE_DAYS}д | "
+            f"параллельно подключаем: {self._connect_limit} (nofile={nofile})"
         )
         if not self.proxies.proxies:
             log.error("❌ Нет прокси, выхожу")
@@ -360,7 +385,9 @@ class Spammer:
             "sent_per_min": len(self.sent_ts),
             "flood_per_min": len(self.flood_ts),
             "active_sessions": self.active,
-            "max_sessions": config.MAX_SESSIONS,
+                "max_sessions": config.MAX_SESSIONS,
+                "connect_parallel": self._connect_limit,
+                "nofile_limit": config.current_nofile_limit(),
             "pending": len(self.pending),
             "proxies_total": proxies_total,
             "proxies_in_cooldown": proxies_cd,
