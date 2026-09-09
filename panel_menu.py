@@ -25,8 +25,17 @@ async def nav(cb):
     elif key == "sessions":
         await edit(cb.message, "📦 Сессии:", kb_sessions())
     elif key == "texts":
-        n = len(load_story_refs(config.STORIES_FILE))
-        await edit(cb.message, f"📖 Stories (рассылка): в пуле <b>{n}</b>", kb_texts())
+        g = len(load_story_refs(config.STORIES_GROUPS_FILE))
+        c = len(load_story_refs(config.STORIES_CONTACTS_FILE))
+        legacy = len(load_story_refs(config.STORIES_FILE))
+        await edit(
+            cb.message,
+            f"📖 Истории:\n"
+            f"👥 группы: <b>{g}</b> (<code>stories_groups.txt</code>)\n"
+            f"📇 контакты: <b>{c}</b> (<code>stories_contacts.txt</code>)\n"
+            f"<i>fallback stories.txt: {legacy}</i>",
+            kb_texts(),
+        )
     elif key == "run":
         await edit(cb.message, "⚙️ Рассылка:", kb_run())
     elif key == "status":

@@ -14,7 +14,7 @@ from domain_setup import (
 from panel_control import esc
 from panel_kb import kb_back_texts
 from panel_ui import admin_only, reset_state, state, waiting
-from story_refs import load_story_refs, parse_story_line, save_story_refs
+from story_refs import load_story_refs, parse_story_line, save_story_refs, toggle_story_ref
 
 router = Router()
 router.message.filter(admin_only)
@@ -185,54 +185,65 @@ def toggle_bot_line(token, link):
     return "added", len(config.load_bot_links())
 
 
-def toggle_story_line(text):
-    ref = parse_story_line(text)
-    if not ref:
-        return None, "invalid", ""
-    refs = load_story_refs(config.STORIES_FILE)
-    key = (ref.peer.lower(), ref.story_id)
-    for i, r in enumerate(refs):
-        if (r.peer.lower(), r.story_id) == key:
-            refs.pop(i)
-            save_story_refs(refs, config.STORIES_FILE)
-            return "removed", len(refs), ref.label
-    refs.append(ref)
-    save_story_refs(refs, config.STORIES_FILE)
-    return "added", len(refs), ref.label
+def story_pool_path(kind: str):
+    return config.STORIES_GROUPS_FILE if kind == "group" else config.STORIES_CONTACTS_FILE
 
 
-@router.callback_query(F.data == "stories")
-async def cb_stories(cb):
-    refs = load_story_refs(config.STORIES_FILE)
+def story_pool_title(kind: str) -> str:
+    return "группы (stories_groups.txt)" if kind == "group" else "контакты (stories_contacts.txt)"
+
+
+def toggle_story_line(text, kind: str = "group"):
+    return toggle_story_ref(text, story_pool_path(kind))
+
+
+async def _show_story_list(cb, kind: str):
+    refs = load_story_refs(story_pool_path(kind))
+    title = story_pool_title(kind)
     if not refs:
-        await cb.message.answer("Историй нет. Жми «Добавить / убрать».")
+        await cb.message.answer(f"Историй для {title} нет. Жми «Добавить/убрать».")
     else:
         rows = [f"{i}. <code>{esc(r.label)}</code>" for i, r in enumerate(refs[:30], 1)]
         if len(refs) > 30:
             rows.append(f"… и ещё {len(refs) - 30}")
-        await cb.message.answer("📖 stories.txt:\n" + "\n".join(rows))
+        await cb.message.answer(f"📖 {title}:\n" + "\n".join(rows))
+
+
+@router.callback_query(F.data == "stories_groups")
+async def cb_stories_groups(cb):
+    await _show_story_list(cb, "group")
     await cb.answer()
 
 
-@router.callback_query(F.data == "story_toggle")
+@router.callback_query(F.data == "stories_contacts")
+async def cb_stories_contacts(cb):
+    await _show_story_list(cb, "contact")
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("story_toggle:"))
 async def cb_story_toggle(cb):
-    refs = load_story_refs(config.STORIES_FILE)
+    kind = cb.data.split(":", 1)[1]
+    if kind not in ("group", "contact"):
+        kind = "group"
+    pool_kind = "group" if kind == "group" else "contact"
+    refs = load_story_refs(story_pool_path(pool_kind))
     rows = [
-        "📖 <b>Добавить story в рассылку</b>",
+        f"📖 <b>Истории для {story_pool_title(pool_kind)}</b>",
         f"В пуле сейчас: <b>{len(refs)}</b>",
         "",
         "Пришли ссылку или строку (можно несколько, с новой строки):",
-        "<code>https://t.me/testchanelkk/s/1</code>",
+        "<code>https://t.me/channel/s/1</code>",
+        "<code>https://t.me/c/1234567890/s/2</code>",
         "<code>channel|42</code>",
         "",
         "• ссылки <b>не</b> в пуле → <b>добавлю</b>",
         "• та же ссылка ещё раз → <b>удалю</b> из пула",
         "",
         "Рассылка подхватит без перезапуска (~30 сек).",
-        "Или просто кинь ссылку t.me/.../s/... в бот без кнопок.",
     ]
     reset_state(cb.from_user.id)
-    state(cb.from_user.id)["wait"] = "story_toggle"
+    state(cb.from_user.id)["wait"] = f"story_toggle:{pool_kind}"
     await cb.message.answer("\n".join(rows), reply_markup=kb_back_texts())
     await cb.answer()
 
@@ -314,13 +325,16 @@ async def cb_href_bot(cb):
     await cb.answer()
 
 
-@router.message(waiting("href_domain", "href_bot", "story_toggle"))
+@router.message(waiting("href_domain", "href_bot", "story_toggle:group", "story_toggle:contact"))
 async def texts_input(message):
     s = state(message.from_user.id)
     wait = s.get("wait")
     text = (message.text or "").strip()
 
-    if wait == "story_toggle" and text:
+    if wait and wait.startswith("story_toggle:") and text:
+        pool_kind = wait.split(":", 1)[1]
+        if pool_kind not in ("group", "contact"):
+            pool_kind = "group"
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         if not lines:
             await message.answer("Пустая строка.")
@@ -328,9 +342,9 @@ async def texts_input(message):
         added = removed = bad = 0
         added_labels = []
         removed_labels = []
-        total = len(load_story_refs(config.STORIES_FILE))
+        total = len(load_story_refs(story_pool_path(pool_kind)))
         for line in lines:
-            action, total, label = toggle_story_line(line)
+            action, total, label = toggle_story_line(line, pool_kind)
             if action is None:
                 bad += 1
                 continue
@@ -340,7 +354,10 @@ async def texts_input(message):
             else:
                 removed += 1
                 removed_labels.append(label)
-        rows = [f"✅ +{added} | 🗑 −{removed} | ⚠️ пропуск {bad}", f"В пуле: <b>{total}</b>"]
+        rows = [
+            f"✅ +{added} | 🗑 −{removed} | ⚠️ пропуск {bad}",
+            f"В пуле ({story_pool_title(pool_kind)}): <b>{total}</b>",
+        ]
         if added_labels:
             rows.append("Добавлено:")
             for lb in added_labels[:10]:

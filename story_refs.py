@@ -1,11 +1,11 @@
-"""Парсинг строк stories.txt — одна история на строку."""
+"""Парсинг строк stories*.txt — одна история на строку."""
 
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 STORY_URL_RE = re.compile(
-    r"(?:https?://)?(?:www\.)?t\.me/(?P<peer>[^/\s]+)/s/(?P<id>\d+)",
+    r"(?:https?://)?(?:www\.)?t\.me/(?:(?P<peer>[^/\s]+)|c/(?P<channel_id>\d+))/s/(?P<id>\d+)",
     re.IGNORECASE,
 )
 
@@ -19,15 +19,55 @@ class StoryRef:
     def label(self) -> str:
         return f"{self.peer}/s/{self.story_id}"
 
+    def peer_candidates(self) -> list:
+        """Варианты peer для get_entity (публичный username или приватный -100…)."""
+        peer = self.peer.strip().lstrip("@")
+        out: list = []
+        seen: set[str] = set()
+
+        def add(val):
+            key = str(val)
+            if key not in seen:
+                seen.add(key)
+                out.append(val)
+
+        if peer.lstrip("-").isdigit():
+            n = int(peer)
+            add(n)
+            if n > 0:
+                add(int(f"-100{n}"))
+        else:
+            add(peer)
+            add(f"@{peer}")
+            add(f"https://t.me/{peer}")
+        return out
+
+
+def normalize_story_input(text: str) -> str:
+    """Вытащить ссылку/строку из сообщения (в т.ч. с пробелами и переносами)."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    m = STORY_URL_RE.search(raw)
+    if m:
+        if m.group("channel_id"):
+            return f"https://t.me/c/{m.group('channel_id')}/s/{m.group('id')}"
+        return f"https://t.me/{m.group('peer').lstrip('@')}/s/{m.group('id')}"
+    return raw.split()[0] if raw.split() else raw
+
 
 def parse_story_line(line: str) -> StoryRef | None:
-    line = (line or "").strip()
+    line = normalize_story_input(line)
     if not line or line.startswith("#"):
         return None
 
     m = STORY_URL_RE.search(line)
     if m:
-        return StoryRef(peer=m.group("peer").lstrip("@"), story_id=int(m.group("id")))
+        if m.group("channel_id"):
+            peer = m.group("channel_id")
+        else:
+            peer = m.group("peer").lstrip("@")
+        return StoryRef(peer=peer, story_id=int(m.group("id")))
 
     if "|" in line:
         peer, sid = line.split("|", 1)
@@ -62,6 +102,10 @@ def load_story_refs(path: Path) -> list[StoryRef]:
     return refs
 
 
+def stories_fingerprint(refs: list[StoryRef]) -> tuple:
+    return tuple(sorted((r.peer.lower(), r.story_id) for r in refs))
+
+
 def format_story_line(ref: StoryRef) -> str:
     return f"{ref.peer}|{ref.story_id}"
 
@@ -74,3 +118,49 @@ def save_story_refs(refs: list[StoryRef], path: Path) -> None:
     if body:
         body += "\n"
     atomic_write(path, body.encode("utf-8"))
+
+
+def add_story_ref(text: str, path: Path) -> tuple[str, int, str]:
+    """Только добавление. status: added|exists|invalid."""
+    ref = parse_story_line(text)
+    if not ref:
+        return "invalid", len(load_story_refs(path)), ""
+    refs = load_story_refs(path)
+    key = (ref.peer.lower(), ref.story_id)
+    if any((r.peer.lower(), r.story_id) == key for r in refs):
+        return "exists", len(refs), ref.label
+    refs.append(ref)
+    save_story_refs(refs, path)
+    return "added", len(refs), ref.label
+
+
+def remove_story_ref(text: str, path: Path) -> tuple[str, int, str]:
+    """Только удаление. status: removed|missing|invalid."""
+    ref = parse_story_line(text)
+    if not ref:
+        return "invalid", len(load_story_refs(path)), ""
+    refs = load_story_refs(path)
+    key = (ref.peer.lower(), ref.story_id)
+    for i, r in enumerate(refs):
+        if (r.peer.lower(), r.story_id) == key:
+            refs.pop(i)
+            save_story_refs(refs, path)
+            return "removed", len(refs), ref.label
+    return "missing", len(refs), ref.label
+
+
+def toggle_story_ref(text: str, path: Path) -> tuple[str | None, int, str]:
+    """toggle add/remove."""
+    ref = parse_story_line(text)
+    if not ref:
+        return None, len(load_story_refs(path)), ""
+    refs = load_story_refs(path)
+    key = (ref.peer.lower(), ref.story_id)
+    for i, r in enumerate(refs):
+        if (r.peer.lower(), r.story_id) == key:
+            refs.pop(i)
+            save_story_refs(refs, path)
+            return "removed", len(refs), ref.label
+    refs.append(ref)
+    save_story_refs(refs, path)
+    return "added", len(refs), ref.label

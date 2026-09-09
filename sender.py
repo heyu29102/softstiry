@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import random
-import secrets
 import shutil
 import signal
 import sys
@@ -23,6 +22,7 @@ from telethon.errors import (
     PeerIdInvalidError,
     RPCError,
     SlowModeWaitError,
+    UserAlreadyParticipantError,
     UserBannedInChannelError,
 )
 
@@ -34,12 +34,18 @@ except ImportError:
 
     class UsernameNotOccupiedError(RPCError):
         pass
-from telethon.tl import functions
-from telethon.tl.types import InputMediaStory
+
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.types import Channel, InputMediaStory
+
+try:
+    from telethon.tl.functions.stories import GetStoriesByIDRequest
+except ImportError:
+    GetStoriesByIDRequest = None
 
 import config
 from proxies import ProxyPool
-from story_refs import StoryRef, load_story_refs
+from story_refs import StoryRef, load_story_refs, stories_fingerprint
 from target_select import collect_targets
 from textgen import jitter, jitter_up
 
@@ -106,11 +112,15 @@ def humanize(e):
 
 
 def is_soft_target_error(e) -> bool:
-    """Битая цель — пропускаем, не копим errors и не стопаем сессию."""
     if isinstance(e, (PeerIdInvalidError, UsernameInvalidError, UsernameNotOccupiedError)):
         return True
     msg = (getattr(e, "message", "") or str(e) or "").upper()
     return "USERNAMEINVALID" in msg or "NOBODY IS USING THIS USERNAME" in msg
+
+
+def is_story_id_invalid_error(e) -> bool:
+    msg = (getattr(e, "message", "") or str(e) or "").upper()
+    return "STORY_ID_INVALID" in msg
 
 
 def delete_session_files(path):
@@ -134,15 +144,20 @@ def delete_session_files(path):
 
 
 class Spammer:
+    KIND_GROUP = "group"
+    KIND_CONTACT = "user"
+
     def __init__(self):
         self.proxies = None
-        self.stories: list[StoryRef] = []
+        self.story_pools: dict[str, list[StoryRef]] = {self.KIND_GROUP: [], self.KIND_CONTACT: []}
         self.pending = deque()
         self.wake = asyncio.Event()
         self.seen = set()
         self.slots = asyncio.Semaphore(config.MAX_SESSIONS)
         self.sema = asyncio.Semaphore(config.MAX_CONCURRENT)
         self.total = 0
+        self.total_contacts = 0
+        self.total_groups = 0
         self.active = 0
         self.sent_ts = deque()
         self.flood_ts = deque()
@@ -150,27 +165,63 @@ class Spammer:
         self.tasks = set()
         self.stop = asyncio.Event()
         self.flood_rest = {}
-        self.bad_stories: set[tuple[str, int]] = set()
-        self._all_stories_bad_logged = False
+        self.global_bad: dict[str, set[tuple[str, int]]] = {
+            self.KIND_GROUP: set(),
+            self.KIND_CONTACT: set(),
+        }
+        self.story_fail_counts: dict[tuple[str, tuple[str, int]], int] = {}
+        self._stories_fp: dict[str, tuple] = {self.KIND_GROUP: (), self.KIND_CONTACT: ()}
+        self._all_stories_bad_logged: dict[str, bool] = {
+            self.KIND_GROUP: False,
+            self.KIND_CONTACT: False,
+        }
 
     def _story_key(self, story: StoryRef) -> tuple[str, int]:
         return (story.peer.lower(), story.story_id)
 
-    def mark_story_bad(self, story: StoryRef):
-        key = self._story_key(story)
-        if key not in self.bad_stories:
-            self.bad_stories.add(key)
-            alive = len(self.stories) - len(self.bad_stories)
-            log.warning(f"📖 story {story.label} — битая, осталось: {max(0, alive)}/{len(self.stories)}")
-            if alive <= 0 and not self._all_stories_bad_logged:
-                self._all_stories_bad_logged = True
-                log.error("❌ ВСЕ stories битые — обнови stories.txt")
+    def _pool_label(self, kind: str) -> str:
+        return "группы" if kind == self.KIND_GROUP else "контакты"
 
-    def pick_story(self, rng: random.Random, exclude: set[tuple[str, int]] | None = None) -> StoryRef | None:
+    def _pool_file_hint(self, kind: str) -> str:
+        return "stories_groups.txt" if kind == self.KIND_GROUP else "stories_contacts.txt"
+
+    def mark_story_bad_global(self, kind: str, story: StoryRef):
+        key = self._story_key(story)
+        bad = self.global_bad[kind]
+        if key not in bad:
+            bad.add(key)
+            pool = self.story_pools[kind]
+            alive = len(pool) - len(bad)
+            log.warning(
+                f"📖 [{self._pool_label(kind)}] story {story.label} — глобально битая, "
+                f"осталось: {max(0, alive)}/{len(pool)}"
+            )
+            if alive <= 0 and not self._all_stories_bad_logged[kind]:
+                self._all_stories_bad_logged[kind] = True
+                log.error(f"❌ ВСЕ stories для {self._pool_label(kind)} битые — обнови {self._pool_file_hint(kind)}")
+
+    def mark_story_fail(self, kind: str, story: StoryRef):
+        key = self._story_key(story)
+        fail_key = (kind, key)
+        self.story_fail_counts[fail_key] = self.story_fail_counts.get(fail_key, 0) + 1
+        if self.story_fail_counts[fail_key] >= config.STORY_GLOBAL_BAD_THRESHOLD:
+            self.mark_story_bad_global(kind, story)
+
+    def pick_story(
+        self,
+        kind: str,
+        rng: random.Random,
+        session_ready: set[tuple[str, int]],
+        exclude: set[tuple[str, int]] | None = None,
+    ) -> StoryRef | None:
         exclude = exclude or set()
+        bad = self.global_bad[kind]
         pool = [
-            s for s in self.stories
-            if self._story_key(s) not in self.bad_stories and self._story_key(s) not in exclude
+            s
+            for s in self.story_pools[kind]
+            if self._story_key(s) in session_ready
+            and self._story_key(s) not in bad
+            and self._story_key(s) not in exclude
         ]
         if not pool:
             return None
@@ -178,7 +229,6 @@ class Spammer:
 
     @staticmethod
     def _drop_target(targets: list, target_idx: int) -> int:
-        """Убрать битую цель из списка, вернуть новый target_idx."""
         pos = target_idx - 1
         if 0 <= pos < len(targets):
             targets.pop(pos)
@@ -219,29 +269,48 @@ class Spammer:
         except Exception:
             pass
 
+    def _load_pool(self, kind: str):
+        refs, _ = config.load_stories_pool(kind)
+        fp = stories_fingerprint(refs)
+        if fp != self._stories_fp[kind]:
+            self._stories_fp[kind] = fp
+            self.global_bad[kind].clear()
+            for k in list(self.story_fail_counts):
+                if k[0] == kind:
+                    del self.story_fail_counts[k]
+            self._all_stories_bad_logged[kind] = False
+        self.story_pools[kind] = refs
+
     def load_stories(self):
-        self.stories = load_story_refs(config.STORIES_FILE)
-        self.bad_stories.clear()
-        self._all_stories_bad_logged = False
+        self._load_pool(self.KIND_GROUP)
+        self._load_pool(self.KIND_CONTACT)
 
     def load(self):
         self.proxies = ProxyPool.from_file()
         self.load_stories()
+        g_n = len(self.story_pools[self.KIND_GROUP])
+        c_n = len(self.story_pools[self.KIND_CONTACT])
         log.info(
-            f"📖 историй в пуле: {len(self.stories)} | "
-            f"🛰 прокси: {len(self.proxies)} | "
-            f"оффлайн лимит: {config.CONTACT_MAX_OFFLINE_DAYS}д"
+            f"📖 историй: группы {g_n} | контакты {c_n} | "
+            f"🛰 прокси: {len(self.proxies)} | оффлайн лимит: {config.CONTACT_MAX_OFFLINE_DAYS}д"
         )
         if not self.proxies.proxies:
             log.error("❌ Нет прокси, выхожу")
             sys.exit(1)
-        if not self.stories:
-            log.error("❌ stories.txt пуст — добавь истории (канал|id или t.me/.../s/id)")
+        if g_n == 0 and c_n == 0:
+            log.error(
+                "❌ Пусто: stories_groups.txt и stories_contacts.txt "
+                "(или stories.txt как fallback)"
+            )
             sys.exit(1)
 
-    def mark_sent(self):
+    def mark_sent(self, target_kind: str):
         now = time.time()
         self.total += 1
+        if target_kind == self.KIND_CONTACT:
+            self.total_contacts += 1
+        else:
+            self.total_groups += 1
         self.sent_ts.append(now)
         self._trim(self.sent_ts, now)
         return self.total
@@ -265,6 +334,8 @@ class Spammer:
                 "ts": int(now),
                 "uptime_sec": int(now - self.started),
                 "total_sent": self.total,
+                "total_contacts": self.total_contacts,
+                "total_groups": self.total_groups,
                 "sent_per_min": len(self.sent_ts),
                 "flood_per_min": len(self.flood_ts),
                 "active_sessions": self.active,
@@ -272,8 +343,11 @@ class Spammer:
                 "pending": len(self.pending),
                 "proxies_total": len(self.proxies),
                 "proxies_in_cooldown": self.proxies.cooldown_count(),
-                "stories_in_pool": len(self.stories),
-                "mailing_mode": "stories",
+                "stories_groups": len(self.story_pools[self.KIND_GROUP]),
+                "stories_contacts": len(self.story_pools[self.KIND_CONTACT]),
+                "stories_groups_bad": len(self.global_bad[self.KIND_GROUP]),
+                "stories_contacts_bad": len(self.global_bad[self.KIND_CONTACT]),
+                "mailing_mode": "stories_split",
             }
             try:
                 await asyncio.to_thread(
@@ -290,20 +364,31 @@ class Spammer:
             await asyncio.sleep(30)
             self._trim(self.sent_ts, time.time())
             self._trim(self.flood_ts, time.time())
+            g = len(self.story_pools[self.KIND_GROUP])
+            c = len(self.story_pools[self.KIND_CONTACT])
             log.info(
                 f"📊 в минуту: {len(self.sent_ts)} | flood/мин: {len(self.flood_ts)} | "
                 f"активных: {self.active}/{config.MAX_SESSIONS} | очередь: {len(self.pending)} | "
-                f"всего: {self.total} | прокси в кулдауне: {self.proxies.cooldown_count()} | "
-                f"историй: {len(self.stories)}"
+                f"всего: {self.total} (ЛС {self.total_contacts} / группы {self.total_groups}) | "
+                f"истории: гр {g} (бит {len(self.global_bad[self.KIND_GROUP])}) | "
+                f"ЛС {c} (бит {len(self.global_bad[self.KIND_CONTACT])})"
             )
 
     async def reload_stories_loop(self):
         while not self.stop.is_set():
             await asyncio.sleep(config.STORIES_RELOAD_INTERVAL)
             try:
-                stories = await asyncio.to_thread(load_story_refs, config.STORIES_FILE)
-                if stories:
-                    self.stories = stories
+                prev_g = self._stories_fp[self.KIND_GROUP]
+                prev_c = self._stories_fp[self.KIND_CONTACT]
+                self.load_stories()
+                if self._stories_fp[self.KIND_GROUP] != prev_g:
+                    log.info(
+                        f"📖 stories_groups.txt: {len(self.story_pools[self.KIND_GROUP])} в пуле"
+                    )
+                if self._stories_fp[self.KIND_CONTACT] != prev_c:
+                    log.info(
+                        f"📖 stories_contacts.txt: {len(self.story_pools[self.KIND_CONTACT])} в пуле"
+                    )
             except Exception:
                 pass
 
@@ -340,20 +425,13 @@ class Spammer:
         log.info(f"📂 Загружено {len(files)} сессий, лимит одновременно: {config.MAX_SESSIONS}")
 
     async def _get_story_entity(self, client, story: StoryRef):
-        peer = story.peer.strip().lstrip("@")
-        candidates: list = []
-        if peer.lstrip("-").isdigit():
-            candidates.append(int(peer))
-        candidates.extend([peer, f"@{peer}", f"https://t.me/{peer}"])
-        seen: set[str] = set()
         last_err = None
-        for cand in candidates:
-            key = str(cand)
-            if key in seen:
-                continue
-            seen.add(key)
+        for cand in story.peer_candidates():
             try:
                 return await client.get_entity(cand)
+            except ValueError as e:
+                last_err = e
+                continue
             except RPCError as e:
                 last_err = e
                 if is_soft_target_error(e):
@@ -365,32 +443,97 @@ class Spammer:
             raise last_err
         raise StoryPeerError(story.label)
 
-    async def resolve_story_peer(self, client, story: StoryRef, story_cache: dict):
-        key = story.peer.lower()
-        cached = story_cache.get(key)
+    async def _ensure_joined(self, client, entity):
+        if not isinstance(entity, Channel):
+            return
+        if getattr(entity, "left", True) is False:
+            return
+        try:
+            await client(JoinChannelRequest(entity))
+        except UserAlreadyParticipantError:
+            pass
+        except RPCError as e:
+            log.warning(f"join {getattr(entity, 'username', entity.id)}: {humanize(e)}")
+
+    async def _story_exists_for_account(self, client, input_peer, story_id: int) -> bool:
+        if GetStoriesByIDRequest is None:
+            return True
+        try:
+            result = await client(GetStoriesByIDRequest(peer=input_peer, id=[story_id]))
+            stories = getattr(result, "stories", None) or []
+            return any(getattr(s, "id", None) == story_id for s in stories)
+        except RPCError as e:
+            if is_story_id_invalid_error(e):
+                return False
+            return True
+
+    async def prepare_stories(
+        self,
+        client,
+        sid,
+        kind: str,
+        story_cache: dict,
+    ) -> set[tuple[str, int]]:
+        ready: set[tuple[str, int]] = set()
+        peers_resolved: dict[str, object] = {}
+        pool = self.story_pools[kind]
+        available = [s for s in pool if self._story_key(s) not in self.global_bad[kind]]
+
+        for story in available:
+            key = self._story_key(story)
+            peer_key = story.peer.lower()
+            try:
+                if peer_key not in peers_resolved:
+                    entity = await self._get_story_entity(client, story)
+                    await self._ensure_joined(client, entity)
+                    input_peer = await client.get_input_entity(entity)
+                    peers_resolved[peer_key] = input_peer
+                    story_cache[(kind, peer_key)] = input_peer
+                input_peer = peers_resolved[peer_key]
+                if await self._story_exists_for_account(client, input_peer, story.story_id):
+                    ready.add(key)
+                else:
+                    log.warning(
+                        f"{sid} | [{self._pool_label(kind)}] story {story.label} "
+                        f"не видна аккаунту (пропуск для сессии)"
+                    )
+            except StoryPeerError as e:
+                log.warning(f"{sid} | peer {story.label}: {e}")
+            except RPCError as e:
+                log.warning(f"{sid} | story {story.label}: {humanize(e)}")
+            except Exception as e:
+                log.warning(f"{sid} | story {story.label}: {e}")
+
+        log.info(f"{sid} | 📖 [{self._pool_label(kind)}] готово: {len(ready)}/{len(available)}")
+        return ready
+
+    async def resolve_story_peer(self, client, kind: str, story: StoryRef, story_cache: dict):
+        peer_key = story.peer.lower()
+        cache_key = (kind, peer_key)
+        cached = story_cache.get(cache_key)
         if cached is not None:
             return cached
         try:
             entity = await self._get_story_entity(client, story)
+            await self._ensure_joined(client, entity)
             peer = await client.get_input_entity(entity)
         except StoryPeerError:
-            story_cache.pop(key, None)
+            story_cache.pop(cache_key, None)
             raise
         except RPCError as e:
-            story_cache.pop(key, None)
+            story_cache.pop(cache_key, None)
             if is_soft_target_error(e):
                 raise StoryPeerError(story.label) from e
             raise
-        story_cache[key] = peer
+        story_cache[cache_key] = peer
         return peer
 
-    async def send_story(self, client, target_entity, story: StoryRef, story_cache: dict):
-        story_peer = await self.resolve_story_peer(client, story, story_cache)
+    async def send_story(self, client, target_entity, kind: str, story: StoryRef, story_cache: dict):
+        story_peer = await self.resolve_story_peer(client, kind, story, story_cache)
         media = InputMediaStory(peer=story_peer, id=story.story_id)
         await client.send_file(target_entity, file=media)
 
     async def delete_dm_for_me(self, client, sid, target):
-        """Удалить диалог только у себя (revoke=False), не у собеседника."""
         if target.kind != "user" or not config.DELETE_DM_AFTER_SEND:
             return
         try:
@@ -438,8 +581,32 @@ class Spammer:
             if not targets:
                 log.warning(f"{sid} | ⚠️ нет целей (контакты/группы)")
                 return "drop"
-            log.info(f"{sid} | 🎯 целей: {users_n} взаимных контактов + {groups_n} групп (круги)")
-            return await self.send_loop(client, sid, path, targets, rng)
+            log.info(f"{sid} | 🎯 целей: {users_n} контактов + {groups_n} групп")
+
+            story_cache: dict = {}
+            session_ready: dict[str, set[tuple[str, int]]] = {}
+
+            if groups_n > 0 and self.story_pools[self.KIND_GROUP]:
+                session_ready[self.KIND_GROUP] = await self.prepare_stories(
+                    client, sid, self.KIND_GROUP, story_cache
+                )
+            else:
+                session_ready[self.KIND_GROUP] = set()
+
+            if users_n > 0 and self.story_pools[self.KIND_CONTACT]:
+                session_ready[self.KIND_CONTACT] = await self.prepare_stories(
+                    client, sid, self.KIND_CONTACT, story_cache
+                )
+            else:
+                session_ready[self.KIND_CONTACT] = set()
+
+            can_group = groups_n > 0 and bool(session_ready[self.KIND_GROUP])
+            can_contact = users_n > 0 and bool(session_ready[self.KIND_CONTACT])
+            if not can_group and not can_contact:
+                log.warning(f"{sid} | ⚠️ нет доступных stories для этого аккаунта")
+                return "retry"
+
+            return await self.send_loop(client, sid, path, targets, rng, story_cache, session_ready)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -460,15 +627,13 @@ class Spammer:
                 delete_session_files(path)
             log.info(f"{sid} | ⏹ завершена ({int(time.time() - start)}с)")
 
-    async def send_loop(self, client, sid, path, targets, rng):
+    async def send_loop(self, client, sid, path, targets, rng, story_cache, session_ready):
         stint = rng.randint(int(config.REFRESH_INTERVAL * 0.9), int(config.REFRESH_INTERVAL * 1.1))
         errors = 0
-        bad_peers = 0
         start = time.time()
         sent_local = 0
         target_idx = 0
         total = len(targets)
-        story_cache: dict[str, object] = {}
 
         while True:
             if target_idx >= total:
@@ -482,29 +647,35 @@ class Spammer:
 
             target = targets[target_idx]
             target_idx += 1
-            kind_tag = "ЛС" if target.kind == "user" else "группа"
+            kind = target.kind
+            pool_kind = self.KIND_GROUP if kind == "group" else self.KIND_CONTACT
+            kind_tag = "ЛС" if kind == "user" else "группа"
             pos = f"{target_idx}/{total}"
+
+            if not session_ready.get(pool_kind):
+                continue
 
             try:
                 story: StoryRef | None = None
                 tried: set[tuple[str, int]] = set()
                 sent_ok = False
                 target_bad = False
-                attempts = min(5, max(1, len(self.stories)))
+                ready = session_ready[pool_kind]
+                attempts = min(5, max(1, len(ready)))
 
                 for _ in range(attempts):
-                    story = self.pick_story(rng, exclude=tried)
+                    story = self.pick_story(pool_kind, rng, ready, exclude=tried)
                     if story is None:
                         break
                     tried.add(self._story_key(story))
                     try:
                         async with self.sema:
-                            await self.send_story(client, target.entity, story, story_cache)
+                            await self.send_story(client, target.entity, pool_kind, story, story_cache)
                         sent_ok = True
                         break
                     except StoryPeerError:
-                        self.mark_story_bad(story)
-                        story_cache.pop(story.peer.lower(), None)
+                        ready.discard(self._story_key(story))
+                        story_cache.pop((pool_kind, story.peer.lower()), None)
                     except (UsernameInvalidError, UsernameNotOccupiedError, PeerIdInvalidError) as ue:
                         log.warning(f"{sid} | ⚠ {target.label}: {humanize(ue)}")
                         target_bad = True
@@ -514,17 +685,22 @@ class Spammer:
                             log.warning(f"{sid} | ⚠ {target.label}: {humanize(te)}")
                             target_bad = True
                             break
+                        if is_story_id_invalid_error(te) and story is not None:
+                            self.mark_story_fail(pool_kind, story)
+                            ready.discard(self._story_key(story))
+                            story_cache.pop((pool_kind, story.peer.lower()), None)
+                            continue
                         raise
 
                 if sent_ok and story is not None:
-                    n = self.mark_sent()
+                    n = self.mark_sent(kind)
                     sent_local += 1
-                    errors = bad_peers = 0
+                    errors = 0
                     log.info(
-                        f"{sid} | ✅ story → {kind_tag} {target.label} "
-                        f"({target_idx}/{total}) | {story.label} | всего: {n}"
+                        f"{sid} | ✅ [{self._pool_file_hint(pool_kind)}] story → "
+                        f"{kind_tag} {target.label} ({pos}) | {story.label} | всего: {n}"
                     )
-                    if target.kind == "user":
+                    if kind == "user":
                         await self.delete_dm_for_me(client, sid, target)
                     await asyncio.sleep(jitter(config.DELAY_MESSAGES, 0.3, rng, 1.0))
                     continue
@@ -540,8 +716,17 @@ class Spammer:
                     await asyncio.sleep(jitter(0.3, 0.1, rng, 0.2))
                     continue
 
-                if len(self.bad_stories) >= len(self.stories):
-                    log.error(f"{sid} | ❌ нет живых stories — обнови stories.txt")
+                if not ready:
+                    log.warning(
+                        f"{sid} | ⚠️ пул [{self._pool_label(pool_kind)}] исчерпан для сессии — rotate"
+                    )
+                    return "rotate"
+
+                if len(self.global_bad[pool_kind]) >= len(self.story_pools[pool_kind]):
+                    log.error(
+                        f"{sid} | ❌ все stories [{self._pool_label(pool_kind)}] битые — "
+                        f"обнови {self._pool_file_hint(pool_kind)}"
+                    )
                     await asyncio.sleep(30)
                 continue
 
@@ -563,7 +748,7 @@ class Spammer:
             except ChannelInvalidError as ue:
                 log.warning(f"{sid} | ⚠ {target.label}: {humanize(ue)}")
                 if story:
-                    story_cache.pop(story.peer.lower(), None)
+                    story_cache.pop((pool_kind, story.peer.lower()), None)
                 await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
                 continue
             except PeerFloodError as te:
@@ -581,12 +766,16 @@ class Spammer:
                 if isinstance(te, ChannelInvalidError):
                     log.warning(f"{sid} | ⚠ {target.label}: {msg}")
                     if story:
-                        story_cache.pop(story.peer.lower(), None)
+                        story_cache.pop((pool_kind, story.peer.lower()), None)
                     await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
                     continue
                 log.error(f"{sid} | ✖ {target.label}: {msg}")
-                if "STORY_ID_INVALID" in msg.upper():
+                if story is not None and is_story_id_invalid_error(te):
+                    self.mark_story_fail(pool_kind, story)
+                    session_ready[pool_kind].discard(self._story_key(story))
+                    story_cache.pop((pool_kind, story.peer.lower()), None)
                     await asyncio.sleep(jitter(2, 0.2, rng, 0.5))
+                    continue
                 errors += 1
                 await asyncio.sleep(jitter(5, 0.2, rng, 1.0))
             except Exception as ex:
@@ -652,8 +841,10 @@ class Spammer:
             asyncio.create_task(self.reload_stories_loop()),
         ]
         log.info(
-            f"💬 Старт (stories). Лимит сессий: {config.MAX_SESSIONS}, "
-            f"параллельно: {config.MAX_CONCURRENT}, историй: {len(self.stories)}"
+            f"💬 Старт (stories: группы + контакты). Лимит сессий: {config.MAX_SESSIONS}, "
+            f"параллельно: {config.MAX_CONCURRENT} | "
+            f"гр: {len(self.story_pools[self.KIND_GROUP])} | "
+            f"ЛС: {len(self.story_pools[self.KIND_CONTACT])}"
         )
         try:
             await self.stop.wait()

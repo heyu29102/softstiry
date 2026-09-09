@@ -73,7 +73,9 @@ SESSIONS_RU_DIR = SESSIONS_PEER_DIR if SESSION_ROUTE_ROLE in ("main", "intl", ""
 PHOTO_DIR = BASE_DIR / "Photo"
 TMP_DIR = BASE_DIR / ".panel_tmp"
 TEXT_FILE = BASE_DIR / "text.txt"
-STORIES_FILE = BASE_DIR / "stories.txt"
+STORIES_FILE = BASE_DIR / "stories.txt"  # legacy fallback
+STORIES_GROUPS_FILE = BASE_DIR / "stories_groups.txt"
+STORIES_CONTACTS_FILE = BASE_DIR / "stories_contacts.txt"
 DOMAINS_FILE = BASE_DIR / "domains.txt"
 CHANNELS_FILE = BASE_DIR / "channels.txt"
 BOTS_FILE = BASE_DIR / "bots.txt"  # redirect + bot_watcher
@@ -108,6 +110,7 @@ MAX_ERRORS = _int("MAX_ERRORS", 13)
 CONTACT_MAX_OFFLINE_DAYS = _int("CONTACT_MAX_OFFLINE_DAYS", 7)
 DELETE_DM_AFTER_SEND = _env("DELETE_DM_AFTER_SEND", "1").lower() not in ("0", "false", "no", "")
 STORIES_RELOAD_INTERVAL = _int("STORIES_RELOAD_INTERVAL", 30)
+STORY_GLOBAL_BAD_THRESHOLD = _int("STORY_GLOBAL_BAD_THRESHOLD", 3)
 BOTS_RELOAD_INTERVAL = _int("BOTS_RELOAD_INTERVAL", 30)
 REDIRECT_PORT = _int("REDIRECT_PORT", 8090)
 REDIRECT_HOST = _env("REDIRECT_HOST", "127.0.0.1")
@@ -124,9 +127,30 @@ for _d in (SESSIONS_DIR, BAD_DIR, PHOTO_DIR, TMP_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 if SESSIONS_PEER_DIR is not None:
     SESSIONS_PEER_DIR.mkdir(parents=True, exist_ok=True)
-for _f in (TEXT_FILE, STORIES_FILE, PROXY_FILE, DOMAINS_FILE, CHANNELS_FILE, BOTS_FILE):
+for _f in (
+    TEXT_FILE,
+    STORIES_FILE,
+    STORIES_GROUPS_FILE,
+    STORIES_CONTACTS_FILE,
+    PROXY_FILE,
+    DOMAINS_FILE,
+    CHANNELS_FILE,
+    BOTS_FILE,
+):
     if not _f.exists():
         _f.touch()
+
+
+def load_stories_pool(kind: str):
+    """Загрузить пул историй: groups | contacts. Пустой файл → fallback stories.txt."""
+    from story_refs import load_story_refs
+
+    path = STORIES_GROUPS_FILE if kind == "group" else STORIES_CONTACTS_FILE
+    refs = load_story_refs(path)
+    if refs:
+        return refs, path
+    legacy = load_story_refs(STORIES_FILE)
+    return legacy, STORIES_FILE
 
 
 def atomic_write(path, data):
@@ -254,8 +278,8 @@ def texts_use_channel_placeholder(texts):
 
 
 def mailing_mode(texts=None):
-    """Рассылка только stories (из stories.txt)."""
-    return "stories"
+    """Рассылка stories: отдельные пулы для групп и контактов."""
+    return "stories_split"
 
 
 def save_blocks(blocks, path=TEXT_FILE):
