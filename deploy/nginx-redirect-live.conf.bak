@@ -1,0 +1,18 @@
+# Автогенерация из domains.txt — правь пул в панели, не этот файл вручную
+# Cloudflare: origin HTTP 80 → redirect.py (без return 301 https на origin)
+server {
+    listen 80;
+    listen [::]:80;
+    server_name alekorotobl.info allecontevideo.pro allertovovideo.info cont-all-here.pro hereconttttent.pro herevidddeo.pro hhggcontent.pro look-now.pro videoall.pro videohereff.pro www.alekorotobl.info www.allecontevideo.pro www.allertovovideo.info www.cont-all-here.pro www.hereconttttent.pro www.herevidddeo.pro www.hhggcontent.pro www.look-now.pro www.videoall.pro www.videohereff.pro;
+
+    location / {
+        proxy_pass http://127.0.0.1:8090;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;
+        proxy_set_header CF-IPCountry $http_cf_ipcountry;
+    }
+}

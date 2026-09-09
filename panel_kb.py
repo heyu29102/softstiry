@@ -13,8 +13,7 @@ def kb_main():
     k.button(text="⚙️ Рассылка", callback_data="nav:run")
     k.button(text="🤖 Авто", callback_data="nav:auto")
     k.button(text="📊 Статус", callback_data="nav:status")
-    k.button(text="📋 Группы @", callback_data="nav:groups_hits")
-    k.adjust(2, 2, 2, 1)
+    k.adjust(2, 2, 1)
     return k.as_markup()
 
 
@@ -30,7 +29,8 @@ def kb_sessions():
 
 def kb_texts():
     k = InlineKeyboardBuilder()
-    k.button(text="📖 Story в пул / убрать", callback_data="href_story")
+    k.button(text="📜 Список stories", callback_data="stories")
+    k.button(text="➕ Добавить story (ссылка)", callback_data="story_toggle")
     k.button(text="🌐 Домен в пул / убрать", callback_data="href_domain")
     k.button(text="🤖 Бот в пул / убрать", callback_data="href_bot")
     k.button(text="⬅️ Назад", callback_data="nav:main")
@@ -56,20 +56,10 @@ def kb_run():
 def kb_status():
     k = InlineKeyboardBuilder()
     k.button(text="🔄 Обновить", callback_data="nav:status")
-    k.button(text="📋 Группы @", callback_data="nav:groups_hits")
     k.button(text="📜 Хвост логов", callback_data="tail")
     k.button(text="📦 Скачать лог", callback_data="dl")
     k.button(text="⬅️ Назад", callback_data="nav:main")
-    k.adjust(2, 1, 1, 1)
-    return k.as_markup()
-
-
-def kb_groups_hits():
-    k = InlineKeyboardBuilder()
-    k.button(text="🔄 Обновить", callback_data="nav:groups_hits")
-    k.button(text="📊 Статус", callback_data="nav:status")
-    k.button(text="⬅️ Назад", callback_data="nav:main")
-    k.adjust(2, 1)
+    k.adjust(1)
     return k.as_markup()
 
 

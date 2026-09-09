@@ -3,9 +3,6 @@ import os
 import tempfile
 
 import config
-from telethon_patch import apply_telethon_patch
-
-apply_telethon_patch()
 from sender import Spammer
 
 _lock = None

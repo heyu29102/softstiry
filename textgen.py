@@ -23,15 +23,11 @@ TEXT_VARIANTS = {
 }
 
 
-def jitter(base, spread, rng, low=None):
+def jitter(base, spread, rng, low=0.5):
     if base <= 0:
         return 0
-    if low is None:
-        low = min(0.02, base * 0.25)
     d = base * spread
-    lo = max(low, base - d) if d else base
-    hi = base + d if d else base
-    return max(low, rng.uniform(lo, hi))
+    return max(low, rng.uniform(max(low, base - d), base + d))
 
 
 def jitter_up(base, rng, ratio=0.2, low=1.0):

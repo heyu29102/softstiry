@@ -8,7 +8,7 @@ BACKUP="/tmp/new-soft-backup-$(date +%F-%H%M%S)"
 
 echo "=== backup data ==="
 mkdir -p "$BACKUP"
-for f in stories.txt bots.txt domains.txt channels.txt proxy.txt .env text.txt; do
+for f in stories.txt stories_contacts.txt stories_groups.txt bots.txt domains.txt channels.txt proxy.txt .env text.txt; do
   [[ -f "$ROOT/$f" ]] && cp -a "$ROOT/$f" "$BACKUP/"
 done
 echo "Бэкап: $BACKUP"
@@ -28,7 +28,7 @@ git reset --hard "origin/$BRANCH"
 
 echo ""
 echo "=== restore data ==="
-for f in stories.txt bots.txt domains.txt channels.txt proxy.txt .env text.txt; do
+for f in stories.txt stories_contacts.txt stories_groups.txt bots.txt domains.txt channels.txt proxy.txt .env text.txt; do
   [[ -f "$BACKUP/$f" ]] && cp -a "$BACKUP/$f" "$ROOT/"
 done
 
