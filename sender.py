@@ -303,6 +303,7 @@ class Spammer:
                 "(или stories.txt как fallback)"
             )
             sys.exit(1)
+        self.write_stats_now()
 
     def mark_sent(self, target_kind: str):
         now = time.time()
@@ -325,38 +326,47 @@ class Spammer:
         while buf and buf[0] < now - 60:
             buf.popleft()
 
+    def _stats_payload(self) -> dict:
+        now = time.time()
+        self._trim(self.sent_ts, now)
+        self._trim(self.flood_ts, now)
+        proxies_total = len(self.proxies) if self.proxies else 0
+        proxies_cd = self.proxies.cooldown_count() if self.proxies else 0
+        return {
+            "ts": int(now),
+            "uptime_sec": int(now - self.started),
+            "total_sent": self.total,
+            "total_contacts": self.total_contacts,
+            "total_groups": self.total_groups,
+            "sent_per_min": len(self.sent_ts),
+            "flood_per_min": len(self.flood_ts),
+            "active_sessions": self.active,
+            "max_sessions": config.MAX_SESSIONS,
+            "pending": len(self.pending),
+            "proxies_total": proxies_total,
+            "proxies_in_cooldown": proxies_cd,
+            "stories_groups": len(self.story_pools[self.KIND_GROUP]),
+            "stories_contacts": len(self.story_pools[self.KIND_CONTACT]),
+            "stories_groups_bad": len(self.global_bad[self.KIND_GROUP]),
+            "stories_contacts_bad": len(self.global_bad[self.KIND_CONTACT]),
+            "mailing_mode": "stories_split",
+        }
+
+    def write_stats_now(self):
+        try:
+            config.atomic_write(
+                config.STATS_FILE,
+                json.dumps(self._stats_payload(), ensure_ascii=False).encode("utf-8"),
+            )
+        except Exception as e:
+            log.warning(f"не записал stats.json: {e}")
+
     async def write_stats_loop(self):
         while not self.stop.is_set():
-            now = time.time()
-            self._trim(self.sent_ts, now)
-            self._trim(self.flood_ts, now)
-            data = {
-                "ts": int(now),
-                "uptime_sec": int(now - self.started),
-                "total_sent": self.total,
-                "total_contacts": self.total_contacts,
-                "total_groups": self.total_groups,
-                "sent_per_min": len(self.sent_ts),
-                "flood_per_min": len(self.flood_ts),
-                "active_sessions": self.active,
-                "max_sessions": config.MAX_SESSIONS,
-                "pending": len(self.pending),
-                "proxies_total": len(self.proxies),
-                "proxies_in_cooldown": self.proxies.cooldown_count(),
-                "stories_groups": len(self.story_pools[self.KIND_GROUP]),
-                "stories_contacts": len(self.story_pools[self.KIND_CONTACT]),
-                "stories_groups_bad": len(self.global_bad[self.KIND_GROUP]),
-                "stories_contacts_bad": len(self.global_bad[self.KIND_CONTACT]),
-                "mailing_mode": "stories_split",
-            }
             try:
-                await asyncio.to_thread(
-                    config.atomic_write,
-                    config.STATS_FILE,
-                    json.dumps(data, ensure_ascii=False).encode("utf-8"),
-                )
-            except Exception:
-                pass
+                await asyncio.to_thread(self.write_stats_now)
+            except Exception as e:
+                log.warning(f"stats loop: {e}")
             await asyncio.sleep(5)
 
     async def log_stats_loop(self):
@@ -467,45 +477,13 @@ class Spammer:
                 return False
             return True
 
-    async def prepare_stories(
-        self,
-        client,
-        sid,
-        kind: str,
-        story_cache: dict,
-    ) -> set[tuple[str, int]]:
-        ready: set[tuple[str, int]] = set()
-        peers_resolved: dict[str, object] = {}
-        pool = self.story_pools[kind]
-        available = [s for s in pool if self._story_key(s) not in self.global_bad[kind]]
-
-        for story in available:
-            key = self._story_key(story)
-            peer_key = story.peer.lower()
-            try:
-                if peer_key not in peers_resolved:
-                    entity = await self._get_story_entity(client, story)
-                    await self._ensure_joined(client, entity)
-                    input_peer = await client.get_input_entity(entity)
-                    peers_resolved[peer_key] = input_peer
-                    story_cache[(kind, peer_key)] = input_peer
-                input_peer = peers_resolved[peer_key]
-                if await self._story_exists_for_account(client, input_peer, story.story_id):
-                    ready.add(key)
-                else:
-                    log.warning(
-                        f"{sid} | [{self._pool_label(kind)}] story {story.label} "
-                        f"не видна аккаунту (пропуск для сессии)"
-                    )
-            except StoryPeerError as e:
-                log.warning(f"{sid} | peer {story.label}: {e}")
-            except RPCError as e:
-                log.warning(f"{sid} | story {story.label}: {humanize(e)}")
-            except Exception as e:
-                log.warning(f"{sid} | story {story.label}: {e}")
-
-        log.info(f"{sid} | 📖 [{self._pool_label(kind)}] готово: {len(ready)}/{len(available)}")
-        return ready
+    def session_ready_keys(self, kind: str) -> set[tuple[str, int]]:
+        """Ключи stories для сессии — резолв peer ленивый при отправке."""
+        return {
+            self._story_key(s)
+            for s in self.story_pools[kind]
+            if self._story_key(s) not in self.global_bad[kind]
+        }
 
     async def resolve_story_peer(self, client, kind: str, story: StoryRef, story_cache: dict):
         peer_key = story.peer.lower()
@@ -584,26 +562,15 @@ class Spammer:
             log.info(f"{sid} | 🎯 целей: {users_n} контактов + {groups_n} групп")
 
             story_cache: dict = {}
-            session_ready: dict[str, set[tuple[str, int]]] = {}
-
-            if groups_n > 0 and self.story_pools[self.KIND_GROUP]:
-                session_ready[self.KIND_GROUP] = await self.prepare_stories(
-                    client, sid, self.KIND_GROUP, story_cache
-                )
-            else:
-                session_ready[self.KIND_GROUP] = set()
-
-            if users_n > 0 and self.story_pools[self.KIND_CONTACT]:
-                session_ready[self.KIND_CONTACT] = await self.prepare_stories(
-                    client, sid, self.KIND_CONTACT, story_cache
-                )
-            else:
-                session_ready[self.KIND_CONTACT] = set()
+            session_ready = {
+                self.KIND_GROUP: self.session_ready_keys(self.KIND_GROUP) if groups_n > 0 else set(),
+                self.KIND_CONTACT: self.session_ready_keys(self.KIND_CONTACT) if users_n > 0 else set(),
+            }
 
             can_group = groups_n > 0 and bool(session_ready[self.KIND_GROUP])
             can_contact = users_n > 0 and bool(session_ready[self.KIND_CONTACT])
             if not can_group and not can_contact:
-                log.warning(f"{sid} | ⚠️ нет доступных stories для этого аккаунта")
+                log.warning(f"{sid} | ⚠️ пустые пулы stories для целей")
                 return "retry"
 
             return await self.send_loop(client, sid, path, targets, rng, story_cache, session_ready)
@@ -833,6 +800,7 @@ class Spammer:
                     loop.add_signal_handler(s, self.stop.set)
                 except NotImplementedError:
                     pass
+        self.write_stats_now()
         bg = [
             asyncio.create_task(self.dispatcher()),
             asyncio.create_task(self.watch_loop()),
