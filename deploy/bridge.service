@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram mailing (app.py)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/new-soft
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/new-soft/app.py
+Restart=on-failure
+RestartSec=10
+# 500+ сессий = тысячи FD (сокеты + sqlite). Без этого — Errno 24.
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

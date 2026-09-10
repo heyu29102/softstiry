@@ -22,6 +22,8 @@ def tune_session_sqlite(client) -> None:
 
 
 def is_session_error(exc: BaseException) -> bool:
+    if is_too_many_open_files(exc):
+        return True
     if isinstance(exc, (ConnectionError, sqlite3.OperationalError, OSError)):
         return True
     msg = (str(exc) or "").lower()
@@ -66,6 +68,23 @@ async def ensure_connected(client, sid: str, log) -> bool:
     except Exception as e:
         log.warning(f"{sid} | reconnect fail: {e}")
         return False
+
+
+async def close_client(client) -> None:
+    try:
+        await client.disconnect()
+    except Exception:
+        pass
+    try:
+        client.session.close()
+    except Exception:
+        pass
+
+
+def is_too_many_open_files(exc: BaseException) -> bool:
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == 24:
+        return True
+    return "too many open files" in (str(exc) or "").lower()
 
 
 async def with_reconnect(client, sid: str, log, op):

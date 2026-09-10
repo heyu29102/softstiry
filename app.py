@@ -30,6 +30,9 @@ def lock_instance():
 
 def main():
     global _lock
+    soft, hard = config.raise_nofile_limit()
+    if soft is not None:
+        print(f"ulimit -n: soft={soft} hard={hard}", flush=True)
     if os.name == "nt":
         try:
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

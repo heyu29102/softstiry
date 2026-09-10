@@ -8,6 +8,8 @@ from opentele.api import API, APIData
 
 log = logging.getLogger("spam")
 
+_api_cache: dict[str, APIData] = {}
+
 _JSON_KEYS_ID = ("app_id", "api_id", "ApiId", "apiId")
 _JSON_KEYS_HASH = ("app_hash", "api_hash", "ApiHash", "apiHash")
 
@@ -27,6 +29,12 @@ def load_session_json(session_path: str | Path) -> dict | None:
         with jp.open("r", encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else None
+    except OSError as e:
+        if getattr(e, "errno", None) == 24:
+            log.error(f"{jp.name}: too many open files — снизь MAX_SESSIONS или подними ulimit -n")
+        else:
+            log.warning(f"{jp.name}: не читается json: {e}")
+        return None
     except Exception as e:
         log.warning(f"{jp.name}: не читается json: {e}")
         return None
@@ -82,11 +90,20 @@ def api_from_json(data: dict) -> APIData:
 
 def client_api(session_path: str | Path) -> APIData:
     """JSON рядом с .session → APIData из него; иначе TelegramDesktop.Generate."""
+    key = str(Path(session_path).resolve())
+    cached = _api_cache.get(key)
+    if cached is not None:
+        return cached
+
     sid = Path(session_path).stem
     data = load_session_json(session_path)
     if data:
         try:
-            return api_from_json(data)
+            api = api_from_json(data)
+            _api_cache[key] = api
+            return api
         except ValueError as e:
             log.warning(f"{sid}: битый json, fallback Generate: {e}")
-    return API.TelegramDesktop.Generate(unique_id=sid)
+    api = API.TelegramDesktop.Generate(unique_id=sid)
+    _api_cache[key] = api
+    return api

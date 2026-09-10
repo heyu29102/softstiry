@@ -102,6 +102,9 @@ AUTO_SERVICE = _env("AUTO_SERVICE", "bridge.service")
 
 # --- рассылка (текст + фото) ---
 MAX_SESSIONS = _int("MAX_SESSIONS", 500)
+FD_PER_SESSION = _int("FD_PER_SESSION", 8)
+NOFILE_TARGET = _int("NOFILE_TARGET", 65535)
+SESSION_SPINUP_DELAY = _float("SESSION_SPINUP_DELAY", 0.12)
 MAX_CONCURRENT = _int("MAX_CONCURRENT", 120)
 REFRESH_INTERVAL = _int("REFRESH_INTERVAL", 120)
 DELAY_MESSAGES = _float("DELAY_MESSAGES", 0.9)
@@ -129,6 +132,40 @@ NGINX_REDIRECT_UPSTREAM = _env("NGINX_REDIRECT_UPSTREAM", f"http://{REDIRECT_HOS
 NGINX_AUTO_RELOAD = _env("NGINX_AUTO_RELOAD", "1").lower() not in ("0", "false", "no", "")
 NGINX_RELOAD_CMD = _env("NGINX_RELOAD_CMD", "sudo nginx -t && sudo systemctl reload nginx")
 SERVER_PUBLIC_IP = _env("SERVER_PUBLIC_IP", "")
+
+def raise_nofile_limit(target=None):
+    """Поднять soft ulimit -n (Linux). Возвращает (soft, hard) или (None, None)."""
+    if os.name == "nt":
+        return None, None
+    import resource
+
+    target = int(target or NOFILE_TARGET)
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = min(hard, target)
+        if soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+            soft = want
+        return soft, hard
+    except Exception:
+        return None, None
+
+
+def effective_max_sessions():
+    """Ограничить MAX_SESSIONS по ulimit -n, чтобы не ловить Errno 24."""
+    cap = MAX_SESSIONS
+    if os.name == "nt":
+        return cap
+    import resource
+
+    try:
+        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if 0 < soft < 1_000_000:
+            cap = min(cap, max(20, (soft - 256) // max(FD_PER_SESSION, 1)))
+    except Exception:
+        pass
+    return cap
+
 
 for _d in (SESSIONS_DIR, BAD_DIR, PHOTO_DIR, TMP_DIR):
     _d.mkdir(parents=True, exist_ok=True)

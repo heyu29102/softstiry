@@ -45,8 +45,10 @@ from proxies import ProxyPool
 from telegram_api import client_api
 from session_utils import (
     SessionSendGuard,
+    close_client,
     ensure_connected,
     is_session_error,
+    is_too_many_open_files,
     session_error_label,
     tune_session_sqlite,
     with_reconnect,
@@ -168,8 +170,10 @@ class Spammer:
         self.pending = deque()
         self.wake = asyncio.Event()
         self.seen = set()
-        self.slots = asyncio.Semaphore(config.MAX_SESSIONS)
+        self.max_sessions = config.effective_max_sessions()
+        self.slots = asyncio.Semaphore(self.max_sessions)
         self.sema = asyncio.Semaphore(config.MAX_CONCURRENT)
+        self.resource_backoff_until = 0.0
         self.total = 0
         self.total_groups = 0
         self.total_contacts = 0
@@ -286,7 +290,8 @@ class Spammer:
                 "sent_per_min": len(self.sent_ts),
                 "flood_per_min": len(self.flood_ts),
                 "active_sessions": self.active,
-                "max_sessions": config.MAX_SESSIONS,
+                "max_sessions": self.max_sessions,
+                "max_sessions_config": config.MAX_SESSIONS,
                 "pending": len(self.pending),
                 "proxies_total": len(self.proxies),
                 "proxies_in_cooldown": self.proxies.cooldown_count(),
@@ -318,7 +323,7 @@ class Spammer:
             self._trim(self.flood_ts, time.time())
             log.info(
                 f"📊 в минуту: {len(self.sent_ts)} | flood/мин: {len(self.flood_ts)} | "
-                f"активных: {self.active}/{config.MAX_SESSIONS} | очередь: {len(self.pending)} | "
+                f"активных: {self.active}/{self.max_sessions} | очередь: {len(self.pending)} | "
                 f"всего: {self.total} | прокси в кулдауне: {self.proxies.cooldown_count()} | "
                 f"текст: {len(self.blocks)} | фото: {len(self.photos)} | доменов: {len(self.domains)} | "
                 f"группы: {self.total_groups} | ЛС: {self.total_contacts}"
@@ -368,7 +373,12 @@ class Spammer:
             self.seen.add(name)
             self.push_front(path)
         self.save_seen()
-        log.info(f"📂 Загружено {len(files)} сессий, лимит одновременно: {config.MAX_SESSIONS}")
+        if self.max_sessions < config.MAX_SESSIONS:
+            log.warning(
+                f"⚠️ MAX_SESSIONS {config.MAX_SESSIONS} → {self.max_sessions} "
+                f"(лимит открытых файлов, FD_PER_SESSION={config.FD_PER_SESSION})"
+            )
+        log.info(f"📂 Загружено {len(files)} сессий, лимит одновременно: {self.max_sessions}")
 
     async def send_delivery(self, client, target_entity, mode: str, caption: str, photo_path: Path | None):
         if mode == "photo" and photo_path is not None:
@@ -463,6 +473,10 @@ class Spammer:
                 await client.connect()
                 tune_session_sqlite(client)
             except Exception as e:
+                if is_too_many_open_files(e):
+                    self.resource_backoff_until = time.time() + 60
+                    log.error(f"{sid} | ❌ Too many open files — пауза запуска 60с")
+                    return "retry"
                 log.warning(f"{sid} | ❌ подключение: {e}")
                 self.proxies.mark_bad(proxy)
                 return "retry"
@@ -502,15 +516,8 @@ class Spammer:
         finally:
             self.proxies.release(proxy)
             self.active -= 1
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
+            await close_client(client)
             if delete_after:
-                try:
-                    client.session.close()
-                except Exception:
-                    pass
                 delete_session_files(path)
             log.info(f"{sid} | ⏹ завершена ({int(time.time() - start)}с)")
 
@@ -639,9 +646,13 @@ class Spammer:
 
     async def dispatcher(self):
         while not self.stop.is_set():
+            while time.time() < self.resource_backoff_until and not self.stop.is_set():
+                await asyncio.sleep(2)
             path = await self.next_path()
             if self.stop.is_set():
                 return
+            if self.active >= int(self.max_sessions * 0.7) or len(self.pending) > 80:
+                await asyncio.sleep(config.SESSION_SPINUP_DELAY)
             while not self.proxies.has_free():
                 if self.stop.is_set():
                     return
@@ -673,7 +684,8 @@ class Spammer:
         ]
         log.info(
             f"💬 Старт: текст+фото → ЛС+группы (без теней). "
-            f"Сессий: {config.MAX_SESSIONS}, параллельно: {config.MAX_CONCURRENT}, "
+            f"Сессий: {self.max_sessions} (cfg {config.MAX_SESSIONS}), "
+            f"параллельно: {config.MAX_CONCURRENT}, "
             f"блоков: {len(self.blocks)}, фото: {len(self.photos)}, доменов: {len(self.domains)}, "
             f"доля фото: {config.PHOTO_SEND_RATIO:.0%}"
         )
