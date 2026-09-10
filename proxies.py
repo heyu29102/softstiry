@@ -2,8 +2,6 @@ import time
 
 import config
 
-PROXY_COOLDOWN = 120
-
 
 def parse_proxy(line):
     line = line.strip()
@@ -57,7 +55,8 @@ class ProxyPool:
 
     def acquire(self):
         now = time.time()
-        free = [p for p in self.proxies if p["bad_until"] <= now]
+        max_per = max(1, config.MAX_SESSIONS_PER_PROXY)
+        free = [p for p in self.proxies if p["bad_until"] <= now and p["in_use"] < max_per]
         if not free:
             return None
         p = min(free, key=lambda x: x["in_use"])
@@ -70,7 +69,7 @@ class ProxyPool:
 
     def mark_bad(self, p):
         if p:
-            p["bad_until"] = time.time() + PROXY_COOLDOWN
+            p["bad_until"] = time.time() + config.PROXY_COOLDOWN
 
     def cooldown_count(self):
         now = time.time()

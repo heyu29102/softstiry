@@ -142,6 +142,16 @@ def is_local_resource_error(e) -> bool:
     return "too many open files" in msg or "errno 24" in msg
 
 
+def is_disconnect_error(e) -> bool:
+    msg = (str(e) or "").lower()
+    return (
+        isinstance(e, ConnectionError)
+        or "disconnected" in msg
+        or "connection reset" in msg
+        or "connection closed" in msg
+    )
+
+
 def delete_session_files(path):
     try:
         for t in (path, path + ".journal", path + "-journal", os.path.splitext(path)[0] + ".json"):
@@ -307,28 +317,29 @@ class Spammer:
 
     def _compute_connect_limit(self) -> int:
         cap = min(config.MAX_CONNECT_PARALLEL, config.MAX_SESSIONS)
+        n_proxy = len(self.proxies.proxies) if self.proxies else 0
+        if n_proxy > 0:
+            # Не больше N сессий на прокси — иначе timeout/disconnect
+            cap = min(cap, n_proxy * config.MAX_SESSIONS_PER_PROXY)
         try:
             import resource
 
             soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
             if soft > 0:
-                # ~12–15 fd на одну telethon-сессию (сокет, sqlite, proxy)
                 cap = min(cap, max(10, (soft - 400) // 15))
         except Exception:
             pass
         return max(10, cap)
 
     def _apply_connect_limit(self):
-        limit = self._compute_connect_limit()
-        if limit != self._connect_limit:
-            self._connect_limit = limit
-            self.slots = asyncio.Semaphore(limit)
-            self.sema = asyncio.Semaphore(min(config.MAX_CONCURRENT, limit))
+        self._connect_limit = self._compute_connect_limit()
+        self.slots = asyncio.Semaphore(self._connect_limit)
+        self.sema = asyncio.Semaphore(min(config.MAX_CONCURRENT, self._connect_limit))
 
     def load(self):
         config.raise_nofile_limit()
-        self._apply_connect_limit()
         self.proxies = ProxyPool.from_file()
+        self._apply_connect_limit()
         self.load_stories()
         g_n = len(self.story_pools[self.KIND_GROUP])
         c_n = len(self.story_pools[self.KIND_CONTACT])
@@ -336,7 +347,8 @@ class Spammer:
         log.info(
             f"📖 историй: группы {g_n} | контакты {c_n} | "
             f"🛰 прокси: {len(self.proxies)} | оффлайн лимит: {config.CONTACT_MAX_OFFLINE_DAYS}д | "
-            f"параллельно подключаем: {self._connect_limit} (nofile={nofile})"
+            f"подключений: {self._connect_limit} | на прокси: ≤{config.MAX_SESSIONS_PER_PROXY} | "
+            f"nofile={nofile}"
         )
         if not self.proxies.proxies:
             log.error("❌ Нет прокси, выхожу")
@@ -600,7 +612,8 @@ class Spammer:
                 await asyncio.wait_for(client.connect(), timeout=config.CONNECT_TIMEOUT)
             except asyncio.TimeoutError:
                 log.warning(f"{sid} | ❌ подключение: timeout {config.CONNECT_TIMEOUT}с")
-                self.proxies.mark_bad(proxy)
+                if proxy.get("in_use", 0) <= 1:
+                    self.proxies.mark_bad(proxy)
                 return "retry"
             except Exception as e:
                 log.warning(f"{sid} | ❌ подключение: {e}")
@@ -736,9 +749,11 @@ class Spammer:
                         f"{sid} | ✅ [{self._pool_file_hint(pool_kind)}] story → "
                         f"{kind_tag} {target.label} ({pos}) | {story.label} | всего: {n}"
                     )
-                    if kind == "user":
-                        await self.delete_dm_for_me(client, sid, target)
-                    await asyncio.sleep(jitter(config.DELAY_MESSAGES, 0.3, rng, 1.0))
+                    if kind == "user" and config.DELETE_DM_AFTER_SEND:
+                        asyncio.create_task(self.delete_dm_for_me(client, sid, target))
+                    delay = config.DELAY_MESSAGES
+                    if delay > 0:
+                        await asyncio.sleep(jitter(delay, 0.2, rng, 0.05))
                     continue
 
                 if target_bad:
@@ -788,9 +803,16 @@ class Spammer:
                 await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
                 continue
             except PeerFloodError as te:
-                log.error(f"{sid} | ✖ {target.label}: {humanize(te)}")
+                log.warning(f"{sid} | ✖ {target.label}: {humanize(te)}")
                 errors += 1
                 await asyncio.sleep(jitter(5, 0.2, rng, 1.0))
+            except (ConnectionError, OSError) as ex:
+                if is_disconnect_error(ex):
+                    log.warning(f"{sid} | 🔌 отвалился коннект → rotate ({ex})")
+                    return "rotate"
+                log.warning(f"{sid} | ✖ {target.label}: {ex}")
+                errors += 1
+                await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
             except RPCError as te:
                 if is_soft_target_error(te):
                     log.warning(f"{sid} | ⚠ {target.label}: {humanize(te)}")
@@ -815,9 +837,12 @@ class Spammer:
                 errors += 1
                 await asyncio.sleep(jitter(5, 0.2, rng, 1.0))
             except Exception as ex:
-                log.exception(f"{sid} | ✖ {target.label}: {ex}")
+                if is_disconnect_error(ex):
+                    log.warning(f"{sid} | 🔌 отвалился коннект → rotate")
+                    return "rotate"
+                log.warning(f"{sid} | ✖ {target.label}: {ex}")
                 errors += 1
-                await asyncio.sleep(jitter(3, 0.2, rng, 0.5))
+                await asyncio.sleep(jitter(2, 0.2, rng, 0.3))
 
             if errors >= config.MAX_ERRORS:
                 log.error(f"{sid} | 🚨 {errors} ошибок подряд — стоп")
@@ -837,7 +862,7 @@ class Spammer:
         if result == "rotate":
             self.push_back(path)
         elif result == "retry":
-            rest = self.flood_rest.pop(os.path.basename(path), 30)
+            rest = self.flood_rest.pop(os.path.basename(path), config.WORKER_RETRY_SLEEP)
             await asyncio.sleep(min(rest, 3600))
             if not self.stop.is_set():
                 self.push_back(path)
@@ -876,10 +901,11 @@ class Spammer:
             asyncio.create_task(self.write_stats_loop()),
             asyncio.create_task(self.log_stats_loop()),
             asyncio.create_task(self.reload_stories_loop()),
+            asyncio.create_task(self.maintenance_loop()),
         ]
         log.info(
-            f"💬 Старт (stories: группы + контакты). Лимит сессий: {config.MAX_SESSIONS}, "
-            f"параллельно: {config.MAX_CONCURRENT} | "
+            f"💬 Старт (stories: группы + контакты). Подключений: {self._connect_limit}, "
+            f"MAX_SESSIONS: {config.MAX_SESSIONS}, sem: {config.MAX_CONCURRENT} | "
             f"гр: {len(self.story_pools[self.KIND_GROUP])} | "
             f"ЛС: {len(self.story_pools[self.KIND_CONTACT])}"
         )
