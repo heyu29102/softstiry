@@ -50,7 +50,7 @@ check "reconnect в sender" "grep -q 'with_reconnect' sender.py"
 check "SQLITE_BUSY_TIMEOUT в config" "grep -q 'SQLITE_BUSY_TIMEOUT_MS' config.py"
 check "telegram_api.py есть" "test -f telegram_api.py"
 check "API из json в sender" "grep -q 'client_api' sender.py"
-check "нет random Generate API" "! grep -q 'TelegramDesktop.Generate' sender.py"
+check "API fallback Generate" "grep -q 'TelegramDesktop.Generate' telegram_api.py"
 
 echo ""
 echo "=== python import ==="

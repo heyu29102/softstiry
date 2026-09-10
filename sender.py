@@ -446,11 +446,7 @@ class Spammer:
         if proxy is None:
             log.error(f"{sid} | ❌ нет свободных прокси")
             return "retry"
-        try:
-            api = client_api(path)
-        except (FileNotFoundError, ValueError) as e:
-            log.error(f"{sid} | ❌ API из json: {e}")
-            return "retry"
+        api = client_api(path)
         client = TelegramClient(
             path,
             api=api,

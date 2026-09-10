@@ -1,10 +1,10 @@
-"""API-пара и device fingerprint из .session + sidecar .json (без random Generate)."""
+"""API-пара: из sidecar .json если есть, иначе TelegramDesktop.Generate как раньше."""
 
 import json
 import logging
 from pathlib import Path
 
-from opentele.api import APIData
+from opentele.api import API, APIData
 
 log = logging.getLogger("spam")
 
@@ -81,10 +81,12 @@ def api_from_json(data: dict) -> APIData:
 
 
 def client_api(session_path: str | Path) -> APIData:
-    """Вернуть APIData из sidecar .json для .session."""
+    """JSON рядом с .session → APIData из него; иначе TelegramDesktop.Generate."""
+    sid = Path(session_path).stem
     data = load_session_json(session_path)
-    if not data:
-        sid = Path(session_path).stem
-        jp = json_path_for_session(session_path).name
-        raise FileNotFoundError(f"нет {jp} рядом с {sid}.session")
-    return api_from_json(data)
+    if data:
+        try:
+            return api_from_json(data)
+        except ValueError as e:
+            log.warning(f"{sid}: битый json, fallback Generate: {e}")
+    return API.TelegramDesktop.Generate(unique_id=sid)
