@@ -252,9 +252,9 @@ async def cb_href_share(cb):
     ph = config.DOMAIN_LINK_PLACEHOLDER
 
     rows = [
-        "🔗 <b>share.google</b> — <code>share_links.txt</code>",
+        "🔗 <b>Ссылки</b> — <code>share_links.txt</code>",
         f"В text.txt шаблон: <code>{esc(ph)}</code>",
-        "На каждую отправку — случайная ссылка из пула.",
+        "t.me, share.google — что угодно. На каждую отправку — случайная из пула.",
         f"В пуле: <b>{len(links)}</b> ссылок",
     ]
 
@@ -269,7 +269,7 @@ async def cb_href_share(cb):
     rows.extend([
         "",
         "Отправь ссылку (можно несколько строк):",
-        "<code>https://share.google/hITG5BWXRfzyxosFI</code>",
+        "<code>https://t.me/HerAllCC0ntentbot?startapp=3888</code>",
         "",
         "• ссылки <b>не</b> в пуле → <b>добавлю</b>",
         "• та же ссылка ещё раз → <b>удалю</b>",

@@ -277,12 +277,11 @@ def status_text():
     photos = len(load_photo_paths())
     domains = len(config.load_domain_links())
     bots = len(config.load_bot_links())
-    shadow = dash(g("shadow_per_min"))
     return (
         f"🖥 app.py: {'🟢 запущен' if run else '🔴 остановлен'} {('PID ' + str(read_pid())) if run else ''}\n"
         f"⏱ Аптайм: <b>{up}</b>\n"
         f"📩 Всего отправлено: <b>{dash(g('total_sent'))}</b>\n"
-        f"📈 В минуту: <b>{dash(g('sent_per_min'))}</b> | 👻 тень/мин: <b>{shadow}</b> | ⏳ flood/мин: <b>{dash(g('flood_per_min'))}</b>\n"
+        f"📈 В минуту: <b>{dash(g('sent_per_min'))}</b> | ⏳ flood/мин: <b>{dash(g('flood_per_min'))}</b>\n"
         f"🧵 Активных: <b>{dash(g('active_sessions'))}/{dash(g('max_sessions'))}</b> | в очереди: <b>{dash(g('pending'))}</b>\n"
         f"📂 sessions: <b>{count_sessions()}</b> | 📝 блоков: <b>{blocks}</b> | 🔗 share: <b>{shares}</b> | 🖼 фото: <b>{photos}</b>\n"
         f"🌐 доменов (redirect): <b>{domains}</b> | 🤖 ботов: <b>{bots}</b>\n"

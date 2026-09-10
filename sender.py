@@ -34,7 +34,6 @@ except ImportError:
 
     class UsernameNotOccupiedError(RPCError):
         pass
-from telethon.tl.types import MessageMediaPhoto
 
 import config
 from mail_content import (
@@ -156,7 +155,7 @@ class Spammer:
         self.proxies = None
         self.blocks: list[str] = []
         self.photos: list[Path] = []
-        self.share_links: list[str] = []
+        self.links: list[str] = []
         self.use_links = False
         self.pending = deque()
         self.wake = asyncio.Event()
@@ -166,11 +165,8 @@ class Spammer:
         self.total = 0
         self.total_groups = 0
         self.total_contacts = 0
-        self.api_accepted = 0
-        self.shadow_total = 0
         self.active = 0
         self.sent_ts = deque()
-        self.shadow_ts = deque()
         self.flood_ts = deque()
         self.started = time.time()
         self.tasks = set()
@@ -220,10 +216,10 @@ class Spammer:
             pass
 
     def load_content(self):
-        blocks, photos, share_links, use_links = load_mailing_content()
+        blocks, photos, links, use_links = load_mailing_content()
         self.blocks = blocks
         self.photos = photos
-        self.share_links = share_links
+        self.links = links
         self.use_links = use_links
 
     def load(self):
@@ -231,8 +227,7 @@ class Spammer:
         self.load_content()
         log.info(
             f"📝 блоков: {len(self.blocks)} | 🖼 фото: {len(self.photos)} | "
-            f"🔗 share.google: {len(self.share_links)} | "
-            f"🛰 прокси: {len(self.proxies)} | "
+            f"🔗 ссылок: {len(self.links)} | 🛰 прокси: {len(self.proxies)} | "
             f"оффлайн лимит: {config.CONTACT_MAX_OFFLINE_DAYS}д"
         )
         if not self.proxies.proxies:
@@ -241,14 +236,14 @@ class Spammer:
         if not self.blocks:
             log.error("❌ text.txt пуст — добавь блоки (разделитель ---)")
             sys.exit(1)
-        if self.use_links and not self.share_links:
-            log.error("❌ share_links.txt пуст — добавь share.google ссылки")
+        if self.use_links and not self.links:
+            log.error("❌ share_links.txt пуст — добавь ссылки (t.me / share.google)")
             sys.exit(1)
 
     def pick_block(self, rng: random.Random) -> str:
         return rng.choice(self.blocks)
 
-    def mark_verified_sent(self, target_kind: str = "group"):
+    def mark_sent(self, target_kind: str):
         now = time.time()
         self.total += 1
         if target_kind == "user":
@@ -258,15 +253,6 @@ class Spammer:
         self.sent_ts.append(now)
         self._trim(self.sent_ts, now)
         return self.total
-
-    def mark_api_accepted(self):
-        self.api_accepted += 1
-
-    def mark_shadow(self):
-        now = time.time()
-        self.shadow_total += 1
-        self.shadow_ts.append(now)
-        self._trim(self.shadow_ts, now)
 
     def mark_flood(self):
         now = time.time()
@@ -282,21 +268,12 @@ class Spammer:
         while not self.stop.is_set():
             now = time.time()
             self._trim(self.sent_ts, now)
-            self._trim(self.shadow_ts, now)
             self._trim(self.flood_ts, now)
-            verified_min = len(self.sent_ts)
-            shadow_min = len(self.shadow_ts)
-            api_min = verified_min + shadow_min
-            verify_rate = round(100.0 * verified_min / api_min, 1) if api_min else 100.0
             data = {
                 "ts": int(now),
                 "uptime_sec": int(now - self.started),
                 "total_sent": self.total,
-                "api_accepted": self.api_accepted,
-                "shadow_total": self.shadow_total,
-                "sent_per_min": verified_min,
-                "shadow_per_min": shadow_min,
-                "verify_rate_pct": verify_rate,
+                "sent_per_min": len(self.sent_ts),
                 "flood_per_min": len(self.flood_ts),
                 "active_sessions": self.active,
                 "max_sessions": config.MAX_SESSIONS,
@@ -305,7 +282,7 @@ class Spammer:
                 "proxies_in_cooldown": self.proxies.cooldown_count(),
                 "text_blocks": len(self.blocks),
                 "photos_in_pool": len(self.photos),
-                "share_links": len(self.share_links),
+                "share_links": len(self.links),
                 "total_groups": self.total_groups,
                 "total_contacts": self.total_contacts,
                 "mail_groups": config.MAIL_GROUPS,
@@ -326,33 +303,25 @@ class Spammer:
         while not self.stop.is_set():
             await asyncio.sleep(30)
             self._trim(self.sent_ts, time.time())
-            self._trim(self.shadow_ts, time.time())
             self._trim(self.flood_ts, time.time())
-            verified_min = len(self.sent_ts)
-            shadow_min = len(self.shadow_ts)
-            api_min = verified_min + shadow_min
-            rate = round(100.0 * verified_min / api_min, 1) if api_min else 100.0
             log.info(
-                f"📊 реально/мин: {verified_min} | 👻 тень/мин: {shadow_min} | "
-                f"доставка: {rate}% | flood/мин: {len(self.flood_ts)} | "
+                f"📊 в минуту: {len(self.sent_ts)} | flood/мин: {len(self.flood_ts)} | "
                 f"активных: {self.active}/{config.MAX_SESSIONS} | очередь: {len(self.pending)} | "
-                f"всего реально: {self.total} | тень всего: {self.shadow_total} | "
-                f"прокси в кулдауне: {self.proxies.cooldown_count()} | "
-                f"текст: {len(self.blocks)} | фото: {len(self.photos)} | "
-                f"share: {len(self.share_links)} | "
-                f"группы: {self.total_groups} | контакты: {self.total_contacts}"
+                f"всего: {self.total} | прокси в кулдауне: {self.proxies.cooldown_count()} | "
+                f"текст: {len(self.blocks)} | фото: {len(self.photos)} | ссылок: {len(self.links)} | "
+                f"группы: {self.total_groups} | ЛС: {self.total_contacts}"
             )
 
     async def reload_content_loop(self):
         while not self.stop.is_set():
             await asyncio.sleep(config.TEXT_RELOAD_INTERVAL)
             try:
-                blocks, photos, share_links, use_links = await asyncio.to_thread(load_mailing_content)
+                blocks, photos, links, use_links = await asyncio.to_thread(load_mailing_content)
                 if blocks:
                     self.blocks = blocks
                 self.photos = photos
-                if share_links:
-                    self.share_links = share_links
+                if links:
+                    self.links = links
                 self.use_links = use_links
             except Exception:
                 pass
@@ -389,61 +358,9 @@ class Spammer:
         self.save_seen()
         log.info(f"📂 Загружено {len(files)} сессий, лимит одновременно: {config.MAX_SESSIONS}")
 
-    @staticmethod
-    def _extract_sent_message(result):
-        if result is None:
-            return None
-        if isinstance(result, list):
-            for item in result:
-                if getattr(item, "id", None):
-                    return item
-            return result[0] if result else None
-        return result
-
-    @staticmethod
-    def _message_matches_delivery(msg, mode: str) -> bool:
-        if not msg or getattr(msg, "action", None):
-            return False
-        if getattr(msg, "deleted", False):
-            return False
-        media = getattr(msg, "media", None)
-        if mode == "photo":
-            return isinstance(media, MessageMediaPhoto)
-        text = (getattr(msg, "message", "") or "").strip()
-        return bool(text)
-
-    async def verify_message_sent(self, client, target_entity, mode: str, sent_msg, rng) -> bool:
-        if not config.VERIFY_SEND:
-            return sent_msg is not None and getattr(sent_msg, "id", None)
-
-        msg_id = getattr(sent_msg, "id", None)
-        if not msg_id:
-            return False
-
-        retries = max(1, config.VERIFY_SEND_RETRIES)
-        for _ in range(retries):
-            await asyncio.sleep(jitter(config.VERIFY_SEND_DELAY, 0.2, rng, 0.15))
-            try:
-                found = await client.get_messages(target_entity, ids=msg_id)
-                if isinstance(found, list):
-                    found = found[0] if found else None
-                if self._message_matches_delivery(found, mode):
-                    return True
-            except Exception:
-                pass
-
-            try:
-                async for msg in client.iter_messages(target_entity, limit=5):
-                    if getattr(msg, "id", None) == msg_id and self._message_matches_delivery(msg, mode):
-                        return True
-            except Exception:
-                pass
-
-        return False
-
     async def send_delivery(self, client, target_entity, mode: str, caption: str, photo_path: Path | None):
         if mode == "photo" and photo_path is not None:
-            result = await client.send_file(
+            await client.send_file(
                 target_entity,
                 file=str(photo_path),
                 caption=caption or None,
@@ -451,8 +368,31 @@ class Spammer:
                 force_document=False,
             )
         else:
-            result = await client.send_message(target_entity, caption, parse_mode="html")
-        return self._extract_sent_message(result)
+            await client.send_message(target_entity, caption, parse_mode="html")
+
+    async def try_send(self, client, target, caption: str, rng, text_only_groups: set[int]) -> tuple[bool, str]:
+        gid = target_group_id(target)
+        text_only = gid is not None and gid in text_only_groups
+        mode = choose_delivery_mode(
+            rng,
+            text_only_group=text_only,
+            has_photos=bool(self.photos),
+        )
+        photo_path = pick_photo(self.photos, rng) if mode == "photo" else None
+        mode_tag = "фото+текст" if mode == "photo" else "текст"
+
+        try:
+            async with self.sema:
+                await self.send_delivery(client, target.entity, mode, caption, photo_path)
+            return True, mode_tag
+        except RPCError as e:
+            if is_media_forbidden_error(e) and mode == "photo":
+                if gid is not None:
+                    text_only_groups.add(gid)
+                async with self.sema:
+                    await self.send_delivery(client, target.entity, "text", caption, None)
+                return True, "текст (fallback)"
+            raise
 
     async def delete_dm_for_me(self, client, sid, target):
         if target.kind != "user" or not config.DELETE_DM_AFTER_SEND:
@@ -504,7 +444,7 @@ class Spammer:
             if not targets:
                 log.warning(f"{sid} | ⚠️ нет целей (контакты/группы)")
                 return "drop"
-            log.info(f"{sid} | 🎯 целей: {users_n} контактов + {groups_n} групп")
+            log.info(f"{sid} | 🎯 целей: {users_n} ЛС + {groups_n} групп")
             return await self.send_loop(client, sid, path, targets, rng)
         except asyncio.CancelledError:
             raise
@@ -531,8 +471,6 @@ class Spammer:
         errors = 0
         start = time.time()
         sent_local = 0
-        shadow_local = 0
-        shadow_streak = 0
         target_idx = 0
         total = len(targets)
         text_only_groups: set[int] = set()
@@ -540,127 +478,40 @@ class Spammer:
         while True:
             if target_idx >= total:
                 target_idx = 0
-                log.info(f"{sid} | 🔁 круг готов, реально {sent_local}, тень {shadow_local}")
+                log.info(f"{sid} | 🔁 круг готов, отправлено {sent_local}")
                 await asyncio.sleep(jitter(config.DELAY_CYCLES, 0.0, rng, 5.0))
 
             if time.time() - start >= stint:
-                log.info(f"{sid} | ♻️ смена слота (~{stint}с), реально {sent_local}, тень {shadow_local}")
+                log.info(f"{sid} | ♻️ смена слота (~{stint}с), отправлено {sent_local}")
                 return "rotate"
 
             target = targets[target_idx]
             target_idx += 1
             kind_tag = "ЛС" if target.kind == "user" else "группа"
             pos = f"{target_idx}/{total}"
-            gid = target_group_id(target)
-            text_only = gid is not None and gid in text_only_groups
 
             block = self.pick_block(rng)
-            caption = render_caption(block, rng, self.share_links, self.use_links)
+            caption = render_caption(block, rng, self.links, self.use_links)
             if not caption:
                 continue
 
-            mode = choose_delivery_mode(
-                rng,
-                text_only_group=text_only,
-                has_photos=bool(self.photos),
-            )
-            photo_path = pick_photo(self.photos, rng) if mode == "photo" else None
-            mode_tag = "фото+текст" if mode == "photo" else "текст"
-
             try:
-                verified_ok = False
-                api_shadow = False
-                target_bad = False
-
-                try:
-                    async with self.sema:
-                        sent_msg = await self.send_delivery(client, target.entity, mode, caption, photo_path)
-                    self.mark_api_accepted()
-                    verified_ok = await self.verify_message_sent(client, target.entity, mode, sent_msg, rng)
-                    if not verified_ok:
-                        api_shadow = True
-                        self.mark_shadow()
-                        shadow_local += 1
-                        shadow_streak += 1
-                        log.warning(
-                            f"{sid} | 👻 тень → {kind_tag} {target.label} ({pos}) | {mode_tag} | "
-                            f"серия: {shadow_streak}"
-                        )
-                        if shadow_streak >= config.SHADOW_SESSION_LIMIT:
-                            log.error(
-                                f"{sid} | 🌑 {shadow_streak} теней подряд — "
-                                f"отдых {config.SHADOW_REST_SEC}с"
-                            )
-                            self.flood_rest[os.path.basename(path)] = config.SHADOW_REST_SEC
-                            return "retry"
-                except (UsernameInvalidError, UsernameNotOccupiedError, PeerIdInvalidError) as ue:
-                    log.warning(f"{sid} | ⚠ {target.label}: {humanize(ue)}")
-                    target_bad = True
-                except RPCError as te:
-                    if is_soft_target_error(te):
-                        log.warning(f"{sid} | ⚠ {target.label}: {humanize(te)}")
-                        target_bad = True
-                    elif is_media_forbidden_error(te) and mode == "photo":
-                        if gid is not None:
-                            text_only_groups.add(gid)
-                        log.warning(f"{sid} | 📵 {target.label}: медиа запрещено → только текст")
-                        try:
-                            async with self.sema:
-                                sent_msg = await self.send_delivery(client, target.entity, "text", caption, None)
-                            self.mark_api_accepted()
-                            verified_ok = await self.verify_message_sent(
-                                client, target.entity, "text", sent_msg, rng
-                            )
-                            if verified_ok:
-                                mode_tag = "текст (fallback)"
-                                shadow_streak = 0
-                            else:
-                                api_shadow = True
-                                self.mark_shadow()
-                                shadow_local += 1
-                                shadow_streak += 1
-                                log.warning(
-                                    f"{sid} | 👻 тень → {kind_tag} {target.label} ({pos}) | {mode_tag} | "
-                                    f"серия: {shadow_streak}"
-                                )
-                        except RPCError as te2:
-                            if is_soft_target_error(te2):
-                                target_bad = True
-                            else:
-                                raise
-                    else:
-                        raise
-
-                if verified_ok:
-                    n = self.mark_verified_sent(target.kind)
+                ok, mode_tag = await self.try_send(client, target, caption, rng, text_only_groups)
+                if ok:
+                    n = self.mark_sent(target.kind)
                     sent_local += 1
-                    shadow_streak = 0
                     errors = 0
-                    log.info(
-                        f"{sid} | ✅ → {kind_tag} {target.label} ({pos}) | {mode_tag} | всего: {n}"
-                    )
+                    log.info(f"{sid} | ✅ → {kind_tag} {target.label} ({pos}) | {mode_tag} | всего: {n}")
                     if target.kind == "user":
                         await self.delete_dm_for_me(client, sid, target)
                     await asyncio.sleep(jitter(config.DELAY_MESSAGES, 0.3, rng, 1.0))
-                    continue
+                continue
 
-                if api_shadow:
-                    await asyncio.sleep(jitter(2.0, 0.3, rng, 1.0))
-                    continue
-
-                if target_bad:
-                    target_idx = self._drop_target(targets, target_idx)
-                    total = len(targets)
-                    if total <= 0:
-                        log.warning(f"{sid} | ⚠️ все цели битые — пересбор")
-                        targets[:] = filter_targets(
-                            await collect_targets(client, rng, config.CONTACT_MAX_OFFLINE_DAYS)
-                        )
-                        total = len(targets)
-                        target_idx = 0
-                    await asyncio.sleep(jitter(0.3, 0.1, rng, 0.2))
-                    continue
-
+            except (UsernameInvalidError, UsernameNotOccupiedError, PeerIdInvalidError) as ue:
+                log.warning(f"{sid} | ⚠ {target.label}: {humanize(ue)}")
+                target_idx = self._drop_target(targets, target_idx)
+                total = len(targets)
+                await asyncio.sleep(jitter(0.3, 0.1, rng, 0.2))
                 continue
 
             except FloodWaitError as fw:
@@ -674,24 +525,34 @@ class Spammer:
                 log.warning(f"{sid} | ⏳ FloodWait {secs}с, пауза ~{int(w)}с")
                 await asyncio.sleep(w)
                 continue
+
             except (ChatWriteForbiddenError, UserBannedInChannelError, ChatAdminRequiredError) as ue:
                 log.warning(f"{sid} | ⚠ {target.label}: {humanize(ue)}")
                 await asyncio.sleep(jitter(1, 0.2, rng, 0.3))
                 continue
+
             except PeerFloodError as te:
                 log.error(f"{sid} | ✖ {target.label}: {humanize(te)}")
                 errors += 1
                 await asyncio.sleep(jitter(5, 0.2, rng, 1.0))
+
             except RPCError as te:
                 if is_soft_target_error(te):
                     log.warning(f"{sid} | ⚠ {target.label}: {humanize(te)}")
                     target_idx = self._drop_target(targets, target_idx)
                     total = len(targets)
+                    if total <= 0:
+                        targets[:] = filter_targets(
+                            await collect_targets(client, rng, config.CONTACT_MAX_OFFLINE_DAYS)
+                        )
+                        total = len(targets)
+                        target_idx = 0
                     await asyncio.sleep(jitter(0.3, 0.1, rng, 0.2))
                     continue
                 log.error(f"{sid} | ✖ {target.label}: {humanize(te)}")
                 errors += 1
                 await asyncio.sleep(jitter(5, 0.2, rng, 1.0))
+
             except Exception as ex:
                 log.exception(f"{sid} | ✖ {target.label}: {ex}")
                 errors += 1
@@ -755,12 +616,10 @@ class Spammer:
             asyncio.create_task(self.reload_content_loop()),
         ]
         log.info(
-            f"💬 Старт (текст+фото → ЛС+группы). Лимит сессий: {config.MAX_SESSIONS}, "
-            f"параллельно: {config.MAX_CONCURRENT}, блоков: {len(self.blocks)}, "
-            f"фото: {len(self.photos)}, share: {len(self.share_links)}, "
-            f"доля фото: {config.PHOTO_SEND_RATIO:.0%} | "
-            f"группы: {'ON' if config.MAIL_GROUPS else 'OFF'} | "
-            f"контакты: {'ON' if config.MAIL_CONTACTS else 'OFF'}"
+            f"💬 Старт: текст+фото → ЛС+группы (без теней). "
+            f"Сессий: {config.MAX_SESSIONS}, параллельно: {config.MAX_CONCURRENT}, "
+            f"блоков: {len(self.blocks)}, фото: {len(self.photos)}, ссылок: {len(self.links)}, "
+            f"доля фото: {config.PHOTO_SEND_RATIO:.0%}"
         )
         try:
             await self.stop.wait()

@@ -111,11 +111,6 @@ CONTACT_MAX_OFFLINE_DAYS = _int("CONTACT_MAX_OFFLINE_DAYS", 7)
 MAIL_GROUPS = _env("MAIL_GROUPS", "1").lower() not in ("0", "false", "no", "")
 MAIL_CONTACTS = _env("MAIL_CONTACTS", "1").lower() not in ("0", "false", "no", "")
 DELETE_DM_AFTER_SEND = _env("DELETE_DM_AFTER_SEND", "1").lower() not in ("0", "false", "no", "")
-VERIFY_SEND = _env("VERIFY_SEND", "1").lower() not in ("0", "false", "no", "")
-VERIFY_SEND_DELAY = _float("VERIFY_SEND_DELAY", 0.5)
-VERIFY_SEND_RETRIES = _int("VERIFY_SEND_RETRIES", 2)
-SHADOW_SESSION_LIMIT = _int("SHADOW_SESSION_LIMIT", 5)
-SHADOW_REST_SEC = _int("SHADOW_REST_SEC", 1800)
 TEXT_RELOAD_INTERVAL = _int("TEXT_RELOAD_INTERVAL", 30)
 PHOTO_SEND_RATIO = _float("PHOTO_SEND_RATIO", 0.85)
 STORIES_RELOAD_INTERVAL = _int("STORIES_RELOAD_INTERVAL", 30)
@@ -291,7 +286,7 @@ def texts_use_channel_placeholder(texts):
 
 
 def mailing_mode(texts=None):
-    """Рассылка текст + фото (share.google из share_links.txt)."""
+    """Рассылка текст + фото в ЛС и группы."""
     return "text+photo"
 
 

@@ -1,4 +1,4 @@
-"""Пул текстов, фото и share.google ссылок для рассылки."""
+"""Пул текстов, фото и ссылок для рассылки (t.me, share.google и т.д.)."""
 
 from __future__ import annotations
 

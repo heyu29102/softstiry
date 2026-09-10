@@ -1,2 +1,3 @@
-# Одна share.google ссылка на строку (можно с https://)
-# https://share.google/hITG5BWXRfzyxosFI
+# Ссылки для {{DOMAIN_LINK}} в text.txt — одна на строку
+# https://t.me/HerAllCC0ntentbot?startapp=3888
+# https://share.google/xxxxx
