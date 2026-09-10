@@ -273,7 +273,6 @@ def status_text():
     log_kb = config.APP_LOG.stat().st_size // 1024 if config.APP_LOG.exists() else 0
     bad = sum(1 for _ in config.BAD_DIR.iterdir()) if config.BAD_DIR.exists() else 0
     blocks = len(config.load_blocks())
-    shares = len(config.load_share_links())
     photos = len(load_photo_paths())
     domains = len(config.load_domain_links())
     bots = len(config.load_bot_links())
@@ -283,8 +282,8 @@ def status_text():
         f"📩 Всего отправлено: <b>{dash(g('total_sent'))}</b>\n"
         f"📈 В минуту: <b>{dash(g('sent_per_min'))}</b> | ⏳ flood/мин: <b>{dash(g('flood_per_min'))}</b>\n"
         f"🧵 Активных: <b>{dash(g('active_sessions'))}/{dash(g('max_sessions'))}</b> | в очереди: <b>{dash(g('pending'))}</b>\n"
-        f"📂 sessions: <b>{count_sessions()}</b> | 📝 блоков: <b>{blocks}</b> | 🔗 share: <b>{shares}</b> | 🖼 фото: <b>{photos}</b>\n"
-        f"🌐 доменов (redirect): <b>{domains}</b> | 🤖 ботов: <b>{bots}</b>\n"
+        f"📂 sessions: <b>{count_sessions()}</b> | 📝 блоков: <b>{blocks}</b> | 🌐 доменов: <b>{domains}</b> | 🖼 фото: <b>{photos}</b>\n"
+        f"🤖 ботов (redirect): <b>{bots}</b>\n"
         f"📨 Режим: <b>текст+фото → ЛС + группы</b>\n"
         f"🛰 Прокси в кулдауне: <b>{dash(g('proxies_in_cooldown'))}</b>/<b>{dash(g('proxies_total'))}</b>\n"
         f"📜 app.log: <b>{log_kb} КБ</b> | 🧹 bad: <b>{bad}</b>"

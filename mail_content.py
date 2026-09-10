@@ -1,9 +1,10 @@
-"""Пул текстов, фото и ссылок для рассылки (t.me, share.google и т.д.)."""
+"""Пул текстов, фото и доменов для рассылки."""
 
 from __future__ import annotations
 
 import random
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 import config
 from textgen import unique_text
@@ -26,23 +27,52 @@ def load_photo_paths(photo_dir: Path | None = None) -> list[Path]:
 def load_mailing_content():
     blocks = config.load_blocks()
     photos = load_photo_paths()
-    share_links = config.load_share_links()
-    use_links = config.texts_use_domain_placeholder(blocks)
-    return blocks, photos, share_links, use_links
+    domains = config.load_domain_links()
+    use_domains = config.texts_use_domain_placeholder(blocks)
+    return blocks, photos, domains, use_domains
 
 
-def pick_share_link(share_links: list[str], rng: random.Random) -> str:
-    if not share_links:
+def domain_base(url: str) -> str:
+    raw = (url or "").strip()
+    if not raw:
         return ""
-    return rng.choice(share_links)
+    if "://" not in raw:
+        raw = "https://" + raw.lstrip("/")
+    parsed = urlparse(raw)
+    if not parsed.netloc:
+        return raw.rstrip("/")
+    return urlunparse((parsed.scheme or "https", parsed.netloc, "", "", "", "")).rstrip("/")
 
 
-def render_caption(block: str, rng: random.Random, share_links: list[str], use_link_ph: bool) -> str:
+def pick_link_path(rng: random.Random) -> str:
+    words = config.link_path_words()
+    word = rng.choice(words)
+    if rng.random() < 0.2:
+        word = f"{word}-{rng.randint(2, 99)}"
+    return word.strip("/").lower()
+
+
+def build_domain_link(base_url: str, rng: random.Random) -> str:
+    base = domain_base(base_url)
+    if not base:
+        return ""
+    if not config.LINK_RANDOM_PATH:
+        return base
+    return f"{base}/{pick_link_path(rng)}"
+
+
+def pick_domain_link(domain_links: list[str], rng: random.Random) -> str:
+    if not domain_links:
+        return ""
+    return build_domain_link(rng.choice(domain_links), rng)
+
+
+def render_caption(block: str, rng: random.Random, domain_links: list[str], use_domain_ph: bool) -> str:
     text = (block or "").strip()
     if not text:
         return ""
-    if use_link_ph and config.DOMAIN_LINK_PLACEHOLDER in text:
-        link = pick_share_link(share_links, rng)
+    if use_domain_ph and config.DOMAIN_LINK_PLACEHOLDER in text:
+        link = pick_domain_link(domain_links, rng)
         if link:
             text = text.replace(config.DOMAIN_LINK_PLACEHOLDER, link)
     return unique_text(text, rng)
@@ -60,7 +90,6 @@ def choose_delivery_mode(
     text_only_group: bool,
     has_photos: bool,
 ) -> str:
-    """Возвращает 'photo' или 'text'."""
     if text_only_group or not has_photos:
         return "text"
     if rng.random() < config.PHOTO_SEND_RATIO:

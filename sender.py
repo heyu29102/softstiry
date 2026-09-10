@@ -155,8 +155,8 @@ class Spammer:
         self.proxies = None
         self.blocks: list[str] = []
         self.photos: list[Path] = []
-        self.links: list[str] = []
-        self.use_links = False
+        self.domains: list[str] = []
+        self.use_domains = False
         self.pending = deque()
         self.wake = asyncio.Event()
         self.seen = set()
@@ -216,18 +216,18 @@ class Spammer:
             pass
 
     def load_content(self):
-        blocks, photos, links, use_links = load_mailing_content()
+        blocks, photos, domains, use_domains = load_mailing_content()
         self.blocks = blocks
         self.photos = photos
-        self.links = links
-        self.use_links = use_links
+        self.domains = domains
+        self.use_domains = use_domains
 
     def load(self):
         self.proxies = ProxyPool.from_file()
         self.load_content()
         log.info(
             f"📝 блоков: {len(self.blocks)} | 🖼 фото: {len(self.photos)} | "
-            f"🔗 ссылок: {len(self.links)} | 🛰 прокси: {len(self.proxies)} | "
+            f"🌐 доменов: {len(self.domains)} | 🛰 прокси: {len(self.proxies)} | "
             f"оффлайн лимит: {config.CONTACT_MAX_OFFLINE_DAYS}д"
         )
         if not self.proxies.proxies:
@@ -236,8 +236,8 @@ class Spammer:
         if not self.blocks:
             log.error("❌ text.txt пуст — добавь блоки (разделитель ---)")
             sys.exit(1)
-        if self.use_links and not self.links:
-            log.error("❌ share_links.txt пуст — добавь ссылки (t.me / share.google)")
+        if self.use_domains and not self.domains:
+            log.error("❌ domains.txt пуст — добавь домены для {{DOMAIN_LINK}}")
             sys.exit(1)
 
     def pick_block(self, rng: random.Random) -> str:
@@ -282,7 +282,7 @@ class Spammer:
                 "proxies_in_cooldown": self.proxies.cooldown_count(),
                 "text_blocks": len(self.blocks),
                 "photos_in_pool": len(self.photos),
-                "share_links": len(self.links),
+                "domains_in_pool": len(self.domains),
                 "total_groups": self.total_groups,
                 "total_contacts": self.total_contacts,
                 "mail_groups": config.MAIL_GROUPS,
@@ -308,7 +308,7 @@ class Spammer:
                 f"📊 в минуту: {len(self.sent_ts)} | flood/мин: {len(self.flood_ts)} | "
                 f"активных: {self.active}/{config.MAX_SESSIONS} | очередь: {len(self.pending)} | "
                 f"всего: {self.total} | прокси в кулдауне: {self.proxies.cooldown_count()} | "
-                f"текст: {len(self.blocks)} | фото: {len(self.photos)} | ссылок: {len(self.links)} | "
+                f"текст: {len(self.blocks)} | фото: {len(self.photos)} | доменов: {len(self.domains)} | "
                 f"группы: {self.total_groups} | ЛС: {self.total_contacts}"
             )
 
@@ -316,13 +316,13 @@ class Spammer:
         while not self.stop.is_set():
             await asyncio.sleep(config.TEXT_RELOAD_INTERVAL)
             try:
-                blocks, photos, links, use_links = await asyncio.to_thread(load_mailing_content)
+                blocks, photos, domains, use_domains = await asyncio.to_thread(load_mailing_content)
                 if blocks:
                     self.blocks = blocks
                 self.photos = photos
-                if links:
-                    self.links = links
-                self.use_links = use_links
+                if domains:
+                    self.domains = domains
+                self.use_domains = use_domains
             except Exception:
                 pass
 
@@ -491,7 +491,7 @@ class Spammer:
             pos = f"{target_idx}/{total}"
 
             block = self.pick_block(rng)
-            caption = render_caption(block, rng, self.links, self.use_links)
+            caption = render_caption(block, rng, self.domains, self.use_domains)
             if not caption:
                 continue
 
@@ -618,7 +618,7 @@ class Spammer:
         log.info(
             f"💬 Старт: текст+фото → ЛС+группы (без теней). "
             f"Сессий: {config.MAX_SESSIONS}, параллельно: {config.MAX_CONCURRENT}, "
-            f"блоков: {len(self.blocks)}, фото: {len(self.photos)}, ссылок: {len(self.links)}, "
+            f"блоков: {len(self.blocks)}, фото: {len(self.photos)}, доменов: {len(self.domains)}, "
             f"доля фото: {config.PHOTO_SEND_RATIO:.0%}"
         )
         try:

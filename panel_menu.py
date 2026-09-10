@@ -26,11 +26,11 @@ async def nav(cb):
         await edit(cb.message, "📦 Сессии:", kb_sessions())
     elif key == "texts":
         blocks = len(config.load_blocks())
-        shares = len(config.load_share_links())
+        domains = len(config.load_domain_links())
         photos = len(load_photo_paths())
         await edit(
             cb.message,
-            f"📝 Рассылка: текст <b>{blocks}</b> | share <b>{shares}</b> | фото <b>{photos}</b>",
+            f"📝 Рассылка: текст <b>{blocks}</b> | доменов <b>{domains}</b> | фото <b>{photos}</b>",
             kb_texts(),
         )
     elif key == "run":

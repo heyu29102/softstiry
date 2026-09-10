@@ -30,9 +30,8 @@ def kb_sessions():
 def kb_texts():
     k = InlineKeyboardBuilder()
     k.button(text="📝 Тексты (text.txt)", callback_data="at")
-    k.button(text="🔗 Ссылки (t.me)", callback_data="href_share")
     k.button(text="🖼 Фото (Photo/)", callback_data="photos")
-    k.button(text="🌐 Домен redirect", callback_data="href_domain")
+    k.button(text="🌐 Домены (рассылка)", callback_data="href_domain")
     k.button(text="🤖 Бот redirect", callback_data="href_bot")
     k.button(text="⬅️ Назад", callback_data="nav:main")
     k.adjust(1)

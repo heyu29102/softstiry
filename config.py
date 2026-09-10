@@ -113,6 +113,8 @@ MAIL_CONTACTS = _env("MAIL_CONTACTS", "1").lower() not in ("0", "false", "no", "
 DELETE_DM_AFTER_SEND = _env("DELETE_DM_AFTER_SEND", "1").lower() not in ("0", "false", "no", "")
 TEXT_RELOAD_INTERVAL = _int("TEXT_RELOAD_INTERVAL", 30)
 PHOTO_SEND_RATIO = _float("PHOTO_SEND_RATIO", 0.85)
+LINK_RANDOM_PATH = _env("LINK_RANDOM_PATH", "1").lower() not in ("0", "false", "no", "")
+LINK_PATH_WORDS = _env("LINK_PATH_WORDS", "")
 STORIES_RELOAD_INTERVAL = _int("STORIES_RELOAD_INTERVAL", 30)
 BOTS_RELOAD_INTERVAL = _int("BOTS_RELOAD_INTERVAL", 30)
 REDIRECT_PORT = _int("REDIRECT_PORT", 8090)
@@ -285,8 +287,23 @@ def texts_use_channel_placeholder(texts):
     return any(ph in t for t in texts)
 
 
+_DEFAULT_LINK_PATH_WORDS = (
+    "hot", "video", "watch", "clip", "photos", "pics", "private", "secret",
+    "new", "live", "leak", "exclusive", "vip", "free", "online", "now",
+    "today", "fresh", "real", "girl", "model", "spicy", "full", "pack",
+)
+
+
+def link_path_words():
+    raw = (LINK_PATH_WORDS or "").strip()
+    if not raw:
+        return list(_DEFAULT_LINK_PATH_WORDS)
+    words = [w.strip().strip("/").lower() for w in raw.split(",") if w.strip()]
+    return words or list(_DEFAULT_LINK_PATH_WORDS)
+
+
 def mailing_mode(texts=None):
-    """Рассылка текст + фото в ЛС и группы."""
+    """Рассылка текст + фото в ЛС и группы (домены из domains.txt)."""
     return "text+photo"
 
 

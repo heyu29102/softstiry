@@ -200,7 +200,7 @@ async def cb_at(cb):
     rows = [
         "📝 <b>text.txt</b> — блоки через <code>---</code>",
         f"В файле: <b>{len(blocks)}</b> блоков",
-        f"Шаблон ссылки: <code>{esc(ph)}</code> (рандом из share_links.txt)",
+        f"Шаблон ссылки: <code>{esc(ph)}</code> (рандом из domains.txt)",
         "",
     ]
     if blocks:
@@ -246,49 +246,21 @@ async def cb_photos(cb):
     await cb.answer()
 
 
-@router.callback_query(F.data == "href_share")
-async def cb_href_share(cb):
-    links = config.load_share_links()
-    ph = config.DOMAIN_LINK_PLACEHOLDER
-
-    rows = [
-        "🔗 <b>Ссылки</b> — <code>share_links.txt</code>",
-        f"В text.txt шаблон: <code>{esc(ph)}</code>",
-        "t.me, share.google — что угодно. На каждую отправку — случайная из пула.",
-        f"В пуле: <b>{len(links)}</b> ссылок",
-    ]
-
-    if links:
-        for i, link in enumerate(links[:10], 1):
-            rows.append(f"{i}. <code>{esc(link)}</code>")
-        if len(links) > 10:
-            rows.append(f"… и ещё {len(links) - 10}")
-    else:
-        rows.append("Пул пуст — добавь ссылки.")
-
-    rows.extend([
-        "",
-        "Отправь ссылку (можно несколько строк):",
-        "<code>https://t.me/HerAllCC0ntentbot?startapp=3888</code>",
-        "",
-        "• ссылки <b>не</b> в пуле → <b>добавлю</b>",
-        "• та же ссылка ещё раз → <b>удалю</b>",
-        "Рассылка подхватит без перезапуска (~30 сек).",
-    ])
-
-    reset_state(cb.from_user.id)
-    state(cb.from_user.id)["wait"] = "href_share"
-    await cb.message.answer("\n".join(rows), reply_markup=kb_back_texts())
-    await cb.answer()
+@router.callback_query(F.data.in_({"href_share"}))
+async def cb_href_share_redirect(cb):
+    await cb_href_domain(cb)
 
 
 @router.callback_query(F.data == "href_domain")
 async def cb_href_domain(cb):
     links = config.load_domain_links()
+    ph = config.DOMAIN_LINK_PLACEHOLDER
 
     rows = [
-        "🌐 <b>Домены для redirect</b> — <code>domains.txt</code>",
-        "(не для рассылки — только веб-редирект на ботов)",
+        "🌐 <b>Домены для рассылки</b> — <code>domains.txt</code>",
+        f"В text.txt шаблон: <code>{esc(ph)}</code>",
+        "На каждую отправку — случайный домен (+ случайный /path).",
+        "Тот же пул идёт на redirect → боты.",
         f"В пуле: <b>{len(links)}</b> доменов",
     ]
 
@@ -354,7 +326,7 @@ async def cb_stories_disabled(cb):
     await cb.answer("Stories отключены — режим текст+фото", show_alert=True)
 
 
-@router.message(waiting("href_domain", "href_bot", "href_share", "text_blocks"))
+@router.message(waiting("href_domain", "href_bot", "text_blocks"))
 async def texts_input(message):
     s = state(message.from_user.id)
     wait = s.get("wait")
@@ -369,29 +341,6 @@ async def texts_input(message):
         await message.answer(
             f"✅ text.txt обновлён, блоков: <b>{len(blocks)}</b>\n"
             "Рассылка подхватит без перезапуска."
-        )
-        return
-
-    if wait == "href_share" and text:
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        if not lines:
-            await message.answer("Пустая строка.")
-            return
-        added = removed = bad = 0
-        total = len(config.load_share_links())
-        for line in lines:
-            action, total = toggle_share_line(line)
-            if action is None:
-                bad += 1
-                continue
-            if action == "added":
-                added += 1
-            else:
-                removed += 1
-        await message.answer(
-            f"✅ +{added} | 🗑 −{removed} | ⚠️ пропуск {bad}\n"
-            f"В пуле share: <b>{total}</b>\n\n"
-            "Ещё ссылки — или ⬅️ Назад."
         )
         return
 
