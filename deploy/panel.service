@@ -1,0 +1,14 @@
+[Unit]
+Description=Telegram panel (panel.py)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/new-soft
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/new-soft/panel.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
