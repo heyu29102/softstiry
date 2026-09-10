@@ -27,7 +27,7 @@ async def cb_up(cb):
     s = state(cb.from_user.id)
     s.clear()
     s["wait"] = "session"
-    msg = await cb.message.answer("📁 Пришли .session / .zip / .rar (или .txt с текстами)")
+    msg = await cb.message.answer("📁 Пришли .session + .json / .zip / .rar (или .txt с текстами)")
     s["prompt_id"] = msg.message_id
     await cb.answer()
 
@@ -73,7 +73,7 @@ async def import_sessions_doc(message, fname, tmp, is_rar):
         kind = "intl" if role in ("ru", "cis", "rushki") else "CIS"
         routed_line = f"\n{peer_label} в пакете {kind}: <b>{res['routed']}</b> (без изменений)"
     if res["files"] == 0:
-        await message.answer("В пакете нет .session.")
+        await message.answer("В пакете нет .session / .json.")
     elif res["added"] + res["updated"] == 0:
         await message.answer(f"Изменений нет. Сессий: <b>{total}</b>{routed_line}")
     elif res["added"] == 1 and res["updated"] == 0 and res["files"] == 1:
@@ -106,7 +106,7 @@ async def handle_doc(message, s, bot):
         await bot.download_file(f.file_path, destination=str(tmp))
         low = fname.lower()
         is_rar = low.endswith(".rar")
-        if low.endswith(".session"):
+        if low.endswith(".session") or low.endswith(".json"):
             await import_sessions_doc(message, fname, tmp, False)
         elif low.endswith(".txt"):
             await save_texts_doc(message, fname, tmp, False)
@@ -120,7 +120,7 @@ async def handle_doc(message, s, bot):
                 await save_texts_doc(message, fname, tmp, is_rar)
         else:
             rm(tmp)
-            await message.answer("Только .session / .zip / .rar / .txt")
+            await message.answer("Только .session / .json / .zip / .rar / .txt")
     except Exception as e:
         rm(tmp)
         await message.answer(f"Ошибка: {esc(e)}")

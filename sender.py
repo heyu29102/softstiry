@@ -13,7 +13,6 @@ from pathlib import Path
 
 import colorama
 from opentele.tl import TelegramClient
-from opentele.api import API
 from telethon.errors import (
     ChatAdminRequiredError,
     ChatWriteForbiddenError,
@@ -43,6 +42,7 @@ from mail_content import (
     render_caption,
 )
 from proxies import ProxyPool
+from telegram_api import client_api
 from session_utils import (
     SessionSendGuard,
     ensure_connected,
@@ -446,7 +446,11 @@ class Spammer:
         if proxy is None:
             log.error(f"{sid} | ❌ нет свободных прокси")
             return "retry"
-        api = API.TelegramDesktop.Generate(unique_id=sid)
+        try:
+            api = client_api(path)
+        except (FileNotFoundError, ValueError) as e:
+            log.error(f"{sid} | ❌ API из json: {e}")
+            return "retry"
         client = TelegramClient(
             path,
             api=api,
@@ -476,7 +480,10 @@ class Spammer:
                 return "retry"
             try:
                 me = await client.get_me()
-                log.info(f"{sid} | 🟢 {getattr(me, 'first_name', '?')} ({getattr(me, 'id', '?')})")
+                log.info(
+                    f"{sid} | 🟢 {getattr(me, 'first_name', '?')} "
+                    f"({getattr(me, 'id', '?')}) api_id={getattr(api, 'api_id', '?')}"
+                )
             except Exception as e:
                 log.warning(f"{sid} | ❌ get_me: {e}")
                 return "retry"

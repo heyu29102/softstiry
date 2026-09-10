@@ -40,14 +40,9 @@ def import_sync(fname, tmp, is_rar, phone_hint=""):
         "routed_updated": 0,
     }
 
-    def write(base, data):
-        base = clean_name(base)
-        if not base.lower().endswith(".session"):
-            return
-        res["files"] += 1
-        dest_dir = _target_dir(base, data, phone_hint)
-        if dest_dir != config.SESSIONS_DIR:
-            res["routed"] += 1
+    session_dirs: dict[str, Path] = {}
+
+    def _write_file(base, data, dest_dir: Path):
         target = dest_dir / base
         sig = (len(data), hashlib.sha256(data).digest())
         cache_key = (str(dest_dir), base)
@@ -75,25 +70,60 @@ def import_sync(fname, tmp, is_rar, phone_hint=""):
         if dest_dir != config.SESSIONS_DIR:
             res["routed_updated"] += 1
 
+    def write_session(base, data):
+        base = clean_name(base)
+        if not base.lower().endswith(".session"):
+            return
+        res["files"] += 1
+        dest_dir = _target_dir(base, data, phone_hint)
+        if dest_dir != config.SESSIONS_DIR:
+            res["routed"] += 1
+        session_dirs[Path(base).stem] = dest_dir
+        _write_file(base, data, dest_dir)
+
+    def write_json(base, data):
+        base = clean_name(base)
+        if not base.lower().endswith(".json"):
+            return
+        res["files"] += 1
+        stem = Path(base).stem
+        dest_dir = session_dirs.get(stem)
+        if dest_dir is None:
+            dest_dir = config.SESSIONS_DIR
+            peer = config.SESSIONS_PEER_DIR
+            if peer is not None:
+                for d in (config.SESSIONS_DIR, peer):
+                    if (d / f"{stem}.session").exists():
+                        dest_dir = d
+                        break
+        _write_file(base, data, dest_dir)
+
+    def write_sidecar(base, data):
+        low = base.lower()
+        if low.endswith(".session"):
+            write_session(base, data)
+        elif low.endswith(".json"):
+            write_json(base, data)
+
     low = fname.lower()
-    if low.endswith(".session"):
-        write(fname, tmp.read_bytes())
+    if low.endswith(".session") or low.endswith(".json"):
+        write_sidecar(fname, tmp.read_bytes())
     elif low.endswith(".zip") and not is_rar:
         with zipfile.ZipFile(tmp) as z:
             for m in z.infolist():
                 b = os.path.basename(m.filename)
-                if b.lower().endswith(".session"):
+                if b.lower().endswith((".session", ".json")):
                     with z.open(m) as src:
-                        write(b, src.read())
+                        write_sidecar(b, src.read())
     elif low.endswith(".rar") and is_rar:
         if not RAR_OK:
             raise RuntimeError("rarfile не установлен")
         with rarfile.RarFile(tmp) as rf:
             for m in rf.infolist():
                 b = os.path.basename(m.filename)
-                if b.lower().endswith(".session"):
+                if b.lower().endswith((".session", ".json")):
                     with rf.open(m) as src:
-                        write(b, src.read())
+                        write_sidecar(b, src.read())
     else:
         raise ValueError("Только .session / .zip / .rar")
     return res
