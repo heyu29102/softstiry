@@ -3,6 +3,7 @@
 Один redirect.py на порту 8090 — несколько доменов через nginx.
 """
 
+import html
 import random
 import socketserver
 import threading
@@ -11,6 +12,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 
 import config
+
+# Страница для share.google: не 302 сразу — браузер остаётся открытым.
+LANDING_PATHS = {"/p", "/preview", "/share"}
 
 
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
@@ -70,6 +74,29 @@ def pick_link():
         return random.choice(pool)
 
 
+def landing_html(bot_link: str) -> bytes:
+    safe = html.escape(bot_link, quote=True)
+    page = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Continue</title>
+  <style>
+    body {{ font-family: system-ui, sans-serif; margin: 0; min-height: 100vh;
+           display: flex; align-items: center; justify-content: center;
+           background: #0f0f12; color: #fff; }}
+    a {{ display: inline-block; padding: 16px 28px; border-radius: 12px;
+         background: #2aabee; color: #fff; text-decoration: none; font-size: 18px; }}
+  </style>
+</head>
+<body>
+  <a href="{safe}">Open in Telegram</a>
+</body>
+</html>"""
+    return page.encode("utf-8")
+
+
 def reload_loop():
     while True:
         try:
@@ -86,7 +113,33 @@ class RedirectHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"[redirect] {self.address_string()} - {fmt % args}")
 
+    def _landing_path(self) -> bool:
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        return path in LANDING_PATHS
+
+    def _serve_landing(self):
+        link = pick_link()
+        if not link:
+            body = b"bot pool empty or only self-links in bots.txt"
+            self.send_response(503)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        body = landing_html(link)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
+        if self._landing_path():
+            self._serve_landing()
+            return
+
         link = pick_link()
         if not link:
             body = b"bot pool empty or only self-links in bots.txt"
@@ -104,6 +157,17 @@ class RedirectHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_HEAD(self):
+        if self._landing_path():
+            link = pick_link()
+            if not link:
+                self.send_response(503)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            return
+
         link = pick_link()
         if not link:
             self.send_response(503)
