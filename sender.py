@@ -43,6 +43,14 @@ from mail_content import (
     render_caption,
 )
 from proxies import ProxyPool
+from session_utils import (
+    SessionSendGuard,
+    ensure_connected,
+    is_session_error,
+    session_error_label,
+    tune_session_sqlite,
+    with_reconnect,
+)
 from target_select import collect_targets
 from textgen import jitter, jitter_up
 
@@ -172,6 +180,8 @@ class Spammer:
         self.tasks = set()
         self.stop = asyncio.Event()
         self.flood_rest = {}
+        self.session_guard = SessionSendGuard()
+        self.session_errors = 0
 
     @staticmethod
     def _drop_target(targets: list, target_idx: int) -> int:
@@ -288,6 +298,8 @@ class Spammer:
                 "mail_groups": config.MAIL_GROUPS,
                 "mail_contacts": config.MAIL_CONTACTS,
                 "mailing_mode": config.mailing_mode(),
+                "session_errors": self.session_errors,
+                "max_concurrent": config.MAX_CONCURRENT,
             }
             try:
                 await asyncio.to_thread(
@@ -370,7 +382,24 @@ class Spammer:
         else:
             await client.send_message(target_entity, caption, parse_mode="html")
 
-    async def try_send(self, client, target, caption: str, rng, text_only_groups: set[int]) -> tuple[bool, str]:
+    async def _guarded_send(self, client, sid, path, target_entity, mode: str, caption: str, photo_path: Path | None):
+        async def _do():
+            async with self.sema:
+                await self.send_delivery(client, target_entity, mode, caption, photo_path)
+
+        async with self.session_guard.lock_for(path):
+            await with_reconnect(client, sid, log, _do)
+
+    async def try_send(
+        self,
+        client,
+        sid,
+        path,
+        target,
+        caption: str,
+        rng,
+        text_only_groups: set[int],
+    ) -> tuple[bool, str]:
         gid = target_group_id(target)
         text_only = gid is not None and gid in text_only_groups
         mode = choose_delivery_mode(
@@ -382,25 +411,33 @@ class Spammer:
         mode_tag = "фото+текст" if mode == "photo" else "текст"
 
         try:
-            async with self.sema:
-                await self.send_delivery(client, target.entity, mode, caption, photo_path)
+            await self._guarded_send(client, sid, path, target.entity, mode, caption, photo_path)
             return True, mode_tag
         except RPCError as e:
             if is_media_forbidden_error(e) and mode == "photo":
                 if gid is not None:
                     text_only_groups.add(gid)
-                async with self.sema:
-                    await self.send_delivery(client, target.entity, "text", caption, None)
+                await self._guarded_send(client, sid, path, target.entity, "text", caption, None)
                 return True, "текст (fallback)"
             raise
 
-    async def delete_dm_for_me(self, client, sid, target):
+    def _schedule_delete_dm(self, client, sid, path, target):
         if target.kind != "user" or not config.DELETE_DM_AFTER_SEND:
             return
-        try:
-            await client.delete_dialog(target.entity, revoke=False)
-        except Exception as e:
-            log.warning(f"{sid} | не удалил диалог {target.label}: {e}")
+
+        async def _job():
+            try:
+                async with self.session_guard.lock_for(path):
+                    await with_reconnect(
+                        client,
+                        sid,
+                        log,
+                        lambda: client.delete_dialog(target.entity, revoke=False),
+                    )
+            except Exception as e:
+                log.warning(f"{sid} | не удалил диалог {target.label}: {e}")
+
+        asyncio.create_task(_job())
 
     async def run_session(self, path):
         rng = random.Random(os.urandom(16))
@@ -410,13 +447,21 @@ class Spammer:
             log.error(f"{sid} | ❌ нет свободных прокси")
             return "retry"
         api = API.TelegramDesktop.Generate(unique_id=sid)
-        client = TelegramClient(path, api=api, proxy=self.proxies.to_dict(proxy))
+        client = TelegramClient(
+            path,
+            api=api,
+            proxy=self.proxies.to_dict(proxy),
+            connection_retries=3,
+            retry_delay=1,
+            auto_reconnect=True,
+        )
         self.active += 1
         start = time.time()
         delete_after = False
         try:
             try:
                 await client.connect()
+                tune_session_sqlite(client)
             except Exception as e:
                 log.warning(f"{sid} | ❌ подключение: {e}")
                 self.proxies.mark_bad(proxy)
@@ -496,14 +541,13 @@ class Spammer:
                 continue
 
             try:
-                ok, mode_tag = await self.try_send(client, target, caption, rng, text_only_groups)
+                ok, mode_tag = await self.try_send(client, sid, path, target, caption, rng, text_only_groups)
                 if ok:
                     n = self.mark_sent(target.kind)
                     sent_local += 1
                     errors = 0
                     log.info(f"{sid} | ✅ → {kind_tag} {target.label} ({pos}) | {mode_tag} | всего: {n}")
-                    if target.kind == "user":
-                        await self.delete_dm_for_me(client, sid, target)
+                    self._schedule_delete_dm(client, sid, path, target)
                     await asyncio.sleep(jitter(config.DELAY_MESSAGES, 0.3, rng, 1.0))
                 continue
 
@@ -554,7 +598,16 @@ class Spammer:
                 await asyncio.sleep(jitter(5, 0.2, rng, 1.0))
 
             except Exception as ex:
-                log.exception(f"{sid} | ✖ {target.label}: {ex}")
+                if is_session_error(ex):
+                    self.session_errors += 1
+                    errors += 1
+                    log.warning(f"{sid} | ✖ {target.label}: {session_error_label(ex)}")
+                    if errors >= 3:
+                        log.warning(f"{sid} | ♻️ сессия нестабильна — ротация")
+                        return "retry"
+                    await asyncio.sleep(jitter(1.5, 0.3, rng, 1.0))
+                    continue
+                log.error(f"{sid} | ✖ {target.label}: {type(ex).__name__}: {ex}")
                 errors += 1
                 await asyncio.sleep(jitter(3, 0.2, rng, 0.5))
 
