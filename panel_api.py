@@ -5,6 +5,7 @@ import httpx
 
 import config
 from panel_control import count_sessions, rm, temp_path
+from panel_import import json_import_line
 from panel_import import archive_has_session, import_package
 
 api_monitor = {"on": False, "etag": None}
@@ -61,11 +62,12 @@ async def api_loop(bot):
                                             f" | {tag}: +{res.get('routed_added', 0)} "
                                             f"/ обн. {res.get('routed_updated', 0)}"
                                         )
+                                    json_line = _json_import_line(res)
                                     for a in config.ADMIN_IDS:
                                         await bot.send_message(
                                             a,
-                                            f"🌐 API: +{res['added']} / обновлено {res['updated']}. "
-                                            f"Сессий: {count_sessions()}{routed}",
+                                            f"🌐 API: сессий +{res['added']} / обн. {res['updated']}"
+                                            f"{json_line}. Всего: {count_sessions()}{routed}",
                                         )
                         finally:
                             if not consumed:

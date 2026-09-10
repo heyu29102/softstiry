@@ -6,7 +6,7 @@ from aiogram import Bot, F, Router
 
 import config
 from panel_control import clean_name, count_sessions, esc, rm, temp_path
-from panel_import import RAR_OK, archive_has_session, import_package, texts_from_upload
+from panel_import import RAR_OK, archive_has_session, import_package, json_import_line, texts_from_upload
 from panel_ui import admin_only, blocks_from, del_msg, state
 
 PHONE_RE = re.compile(r"Телефон:\s*([^\n]+)")
@@ -54,6 +54,14 @@ async def on_document(message, bot: Bot):
     await handle_doc(message, state(message.from_user.id), bot)
 
 
+def _json_import_line(res) -> str:
+    ja = res.get("json_added", 0)
+    ju = res.get("json_updated", 0)
+    if not ja and not ju:
+        return ""
+    return f" | json: +<b>{ja}</b> / обн. <b>{ju}</b>"
+
+
 async def import_sessions_doc(message, fname, tmp, is_rar):
     phone_hint = ""
     phone = PHONE_RE.search((message.caption or "") + "\n" + (message.text or ""))
@@ -61,6 +69,7 @@ async def import_sessions_doc(message, fname, tmp, is_rar):
         phone_hint = phone.group(1).strip()
     res = await import_package(fname, tmp, is_rar=is_rar, phone_hint=phone_hint)
     total = count_sessions()
+    json_line = _json_import_line(res)
     routed_line = ""
     role = config.SESSION_ROUTE_ROLE
     peer_label = "🌐 intl →" if role in ("ru", "cis", "rushki") else "🇷🇺 RU/RB/KZ →"
@@ -72,17 +81,20 @@ async def import_sessions_doc(message, fname, tmp, is_rar):
     elif res.get("routed"):
         kind = "intl" if role in ("ru", "cis", "rushki") else "CIS"
         routed_line = f"\n{peer_label} в пакете {kind}: <b>{res['routed']}</b> (без изменений)"
-    if res["files"] == 0:
-        await message.answer("В пакете нет .session / .json.")
-    elif res["added"] + res["updated"] == 0:
+    sessions = res.get("sessions", res.get("files", 0))
+    if sessions == 0 and not res.get("json_added") and not res.get("json_updated"):
+        await message.answer("В пакете нет .session.")
+    elif res["added"] + res["updated"] == 0 and not res.get("json_added") and not res.get("json_updated"):
         await message.answer(f"Изменений нет. Сессий: <b>{total}</b>{routed_line}")
-    elif res["added"] == 1 and res["updated"] == 0 and res["files"] == 1:
+    elif res["added"] == 1 and res["updated"] == 0 and sessions == 1:
         who = f" {esc(phone_hint)}" if phone_hint else ""
-        await message.answer(f"Новая сессия{who} загружена! Сессий: <b>{total}</b>{routed_line}")
+        await message.answer(
+            f"Новая сессия{who} загружена! Сессий: <b>{total}</b>{json_line}{routed_line}"
+        )
     else:
         await message.answer(
-            f"Добавлено: {res['added']}, обновлено: {res['updated']}. "
-            f"Сессий: <b>{total}</b>{routed_line}"
+            f"Сессий: +<b>{res['added']}</b> / обн. <b>{res['updated']}</b>{json_line}. "
+            f"Всего: <b>{total}</b>{routed_line}"
         )
 
 

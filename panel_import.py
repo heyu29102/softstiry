@@ -31,10 +31,14 @@ def _target_dir(base: str, data: bytes, phone_hint: str) -> Path:
 
 def import_sync(fname, tmp, is_rar, phone_hint=""):
     res = {
+        "sessions": 0,
         "files": 0,
         "added": 0,
         "updated": 0,
         "same": 0,
+        "json_added": 0,
+        "json_updated": 0,
+        "json_same": 0,
         "routed": 0,
         "routed_added": 0,
         "routed_updated": 0,
@@ -42,16 +46,20 @@ def import_sync(fname, tmp, is_rar, phone_hint=""):
 
     session_dirs: dict[str, Path] = {}
 
-    def _write_file(base, data, dest_dir: Path):
+    def _write_file(base, data, dest_dir: Path, kind: str):
         target = dest_dir / base
         sig = (len(data), hashlib.sha256(data).digest())
         cache_key = (str(dest_dir), base)
+        is_session = kind == "session"
         if not target.exists():
             config.atomic_write(target, data)
             hash_cache[cache_key] = sig
-            res["added"] += 1
-            if dest_dir != config.SESSIONS_DIR:
-                res["routed_added"] += 1
+            if is_session:
+                res["added"] += 1
+                if dest_dir != config.SESSIONS_DIR:
+                    res["routed_added"] += 1
+            else:
+                res["json_added"] += 1
             return
         old = hash_cache.get(cache_key)
         if old is None:
@@ -62,30 +70,35 @@ def import_sync(fname, tmp, is_rar, phone_hint=""):
             except Exception:
                 old = None
         if old == sig:
-            res["same"] += 1
+            if is_session:
+                res["same"] += 1
+            else:
+                res["json_same"] += 1
             return
         config.atomic_write(target, data)
         hash_cache[cache_key] = sig
-        res["updated"] += 1
-        if dest_dir != config.SESSIONS_DIR:
-            res["routed_updated"] += 1
+        if is_session:
+            res["updated"] += 1
+            if dest_dir != config.SESSIONS_DIR:
+                res["routed_updated"] += 1
+        else:
+            res["json_updated"] += 1
 
     def write_session(base, data):
         base = clean_name(base)
         if not base.lower().endswith(".session"):
             return
-        res["files"] += 1
+        res["sessions"] += 1
         dest_dir = _target_dir(base, data, phone_hint)
         if dest_dir != config.SESSIONS_DIR:
             res["routed"] += 1
         session_dirs[Path(base).stem] = dest_dir
-        _write_file(base, data, dest_dir)
+        _write_file(base, data, dest_dir, "session")
 
     def write_json(base, data):
         base = clean_name(base)
         if not base.lower().endswith(".json"):
             return
-        res["files"] += 1
         stem = Path(base).stem
         dest_dir = session_dirs.get(stem)
         if dest_dir is None:
@@ -96,7 +109,7 @@ def import_sync(fname, tmp, is_rar, phone_hint=""):
                     if (d / f"{stem}.session").exists():
                         dest_dir = d
                         break
-        _write_file(base, data, dest_dir)
+        _write_file(base, data, dest_dir, "json")
 
     def write_sidecar(base, data):
         low = base.lower()
@@ -126,7 +139,16 @@ def import_sync(fname, tmp, is_rar, phone_hint=""):
                         write_sidecar(b, src.read())
     else:
         raise ValueError("Только .session / .zip / .rar")
+    res["files"] = res["sessions"]
     return res
+
+
+def json_import_line(res) -> str:
+    ja = res.get("json_added", 0)
+    ju = res.get("json_updated", 0)
+    if not ja and not ju:
+        return ""
+    return f" | json: +<b>{ja}</b> / обн. <b>{ju}</b>"
 
 
 async def import_package(fname, tmp, is_rar=False, phone_hint=""):
