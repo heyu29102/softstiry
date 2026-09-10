@@ -2,11 +2,10 @@ from aiogram import F, Router
 from aiogram.filters import Command
 
 import config
+from mail_content import load_photo_paths
 from panel_control import status_text
 from panel_kb import kb_auto, kb_main, kb_run, kb_sessions, kb_status, kb_texts
 from panel_ui import admin_only, edit
-import config
-from mail_content import load_photo_paths
 
 router = Router()
 router.message.filter(admin_only)
