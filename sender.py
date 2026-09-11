@@ -12,7 +12,7 @@ from logging.handlers import RotatingFileHandler
 
 import colorama
 from opentele.tl import TelegramClient
-from opentele.api import API
+from telegram_api import client_api
 from telethon.errors import (
     ChatAdminRequiredError,
     ChatWriteForbiddenError,
@@ -152,24 +152,26 @@ def is_disconnect_error(e) -> bool:
     )
 
 
-def delete_session_files(path):
+def move_session_to_bad(path):
+    """Перенос в sessions_bad (не удалять навсегда)."""
+    moved = False
     try:
         for t in (path, path + ".journal", path + "-journal", os.path.splitext(path)[0] + ".json"):
+            if not os.path.exists(t):
+                continue
+            dst = os.path.join(str(config.BAD_DIR), os.path.basename(t))
+            if os.path.exists(dst):
+                dst = os.path.join(str(config.BAD_DIR), f"{os.path.basename(t)}_{int(time.time())}")
             for _ in range(3):
                 try:
-                    if os.path.exists(t):
-                        os.remove(t)
+                    shutil.move(t, dst)
+                    moved = True
                     break
                 except Exception:
                     time.sleep(0.2)
-        if os.path.exists(path):
-            dst = os.path.join(str(config.BAD_DIR), os.path.basename(path))
-            if os.path.exists(dst):
-                dst = os.path.join(str(config.BAD_DIR), f"{os.path.basename(path)}_{int(time.time())}")
-            shutil.move(path, dst)
     except Exception:
-        log.exception("не смог убрать файлы сессии")
-    return not os.path.exists(path)
+        log.exception("не смог перенести сессию в bad")
+    return moved or not os.path.exists(path)
 
 
 class Spammer:
@@ -205,6 +207,7 @@ class Spammer:
             self.KIND_GROUP: False,
             self.KIND_CONTACT: False,
         }
+        self.auth_fail_counts: dict[str, int] = {}
 
     def _story_key(self, story: StoryRef) -> tuple[str, int]:
         return (story.peer.lower(), story.story_id)
@@ -602,7 +605,7 @@ class Spammer:
         if proxy is None:
             log.error(f"{sid} | ❌ нет свободных прокси")
             return "retry"
-        api = API.TelegramDesktop.Generate(unique_id=sid)
+        api = client_api(sid, path)
         client = TelegramClient(path, api=api, proxy=self.proxies.to_dict(proxy))
         self.active += 1
         start = time.time()
@@ -622,9 +625,21 @@ class Spammer:
                 return "retry"
             try:
                 if not await client.is_user_authorized():
-                    log.error(f"{sid} | ❌ не авторизована, удаляю")
-                    delete_after = True
-                    return "drop"
+                    fails = self.auth_fail_counts.get(sid, 0) + 1
+                    self.auth_fail_counts[sid] = fails
+                    if fails >= config.AUTH_FAIL_BEFORE_BAD:
+                        log.error(
+                            f"{sid} | ❌ не авторизована ({fails}x) → sessions_bad "
+                            f"(api_id={getattr(api, 'api_id', '?')})"
+                        )
+                        delete_after = True
+                        return "drop"
+                    log.warning(
+                        f"{sid} | ⚠️ не авторизована ({fails}/{config.AUTH_FAIL_BEFORE_BAD}), "
+                        f"повтор позже"
+                    )
+                    return "retry"
+                self.auth_fail_counts.pop(sid, None)
             except Exception as e:
                 log.warning(f"{sid} | ❌ авторизация: {e}")
                 return "retry"
@@ -639,8 +654,11 @@ class Spammer:
             users_n = sum(1 for t in targets if t.kind == "user")
             groups_n = sum(1 for t in targets if t.kind == "group")
             if not targets:
-                log.warning(f"{sid} | ⚠️ нет целей (контакты/группы)")
-                return "drop"
+                log.warning(
+                    f"{sid} | ⚠️ нет целей (контакты/группы) — отложена на "
+                    f"{config.NO_TARGETS_RETRY_SEC}с"
+                )
+                return "no_targets"
             log.info(f"{sid} | 🎯 целей: {users_n} контактов + {groups_n} групп")
 
             story_cache: dict = {}
@@ -673,7 +691,8 @@ class Spammer:
                     client.session.close()
                 except Exception:
                     pass
-                delete_session_files(path)
+                move_session_to_bad(path)
+                self.seen.discard(os.path.basename(path))
             log.info(f"{sid} | ⏹ завершена ({int(time.time() - start)}с)")
 
     async def send_loop(self, client, sid, path, targets, rng, story_cache, session_ready):
@@ -861,6 +880,10 @@ class Spammer:
             return
         if result == "rotate":
             self.push_back(path)
+        elif result == "no_targets":
+            await asyncio.sleep(config.NO_TARGETS_RETRY_SEC)
+            if not self.stop.is_set():
+                self.push_back(path)
         elif result == "retry":
             rest = self.flood_rest.pop(os.path.basename(path), config.WORKER_RETRY_SLEEP)
             await asyncio.sleep(min(rest, 3600))

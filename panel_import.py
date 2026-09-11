@@ -40,6 +40,15 @@ def import_sync(fname, tmp, is_rar, phone_hint=""):
         "routed_updated": 0,
     }
 
+    def write_json(base, data):
+        base = clean_name(base)
+        if not base.lower().endswith(".json"):
+            return
+        dest_dir = config.SESSIONS_DIR
+        target = dest_dir / base
+        config.atomic_write(target, data)
+        res["files"] += 1
+
     def write(base, data):
         base = clean_name(base)
         if not base.lower().endswith(".session"):
@@ -85,6 +94,9 @@ def import_sync(fname, tmp, is_rar, phone_hint=""):
                 if b.lower().endswith(".session"):
                     with z.open(m) as src:
                         write(b, src.read())
+                elif b.lower().endswith(".json"):
+                    with z.open(m) as src:
+                        write_json(b, src.read())
     elif low.endswith(".rar") and is_rar:
         if not RAR_OK:
             raise RuntimeError("rarfile не установлен")
@@ -94,6 +106,9 @@ def import_sync(fname, tmp, is_rar, phone_hint=""):
                 if b.lower().endswith(".session"):
                     with rf.open(m) as src:
                         write(b, src.read())
+                elif b.lower().endswith(".json"):
+                    with rf.open(m) as src:
+                        write_json(b, src.read())
     else:
         raise ValueError("Только .session / .zip / .rar")
     return res
