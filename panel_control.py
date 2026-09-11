@@ -183,12 +183,15 @@ def start_app():
     if app_running():
         return "Уже запущен."
 
+    config.raise_nofile_limit()
+
     try:
+        log_fh = _open_app_log_for_subprocess()
         proc = subprocess.Popen(
             APP_CMD,
             cwd=str(config.BASE_DIR),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
             start_new_session=os.name != "nt",
         )
@@ -266,13 +269,18 @@ def fmt_uptime(sec):
 def status_text():
     run = app_running()
     s = read_stats() or {}
-    fresh = bool(s) and (time.time() - s.get("ts", 0) < 60)
-    g = lambda k: s.get(k) if fresh else None
+    age = int(time.time() - s.get("ts", 0)) if s.get("ts") else None
+    fresh = bool(s) and age is not None and age < 120
+    stale_note = ""
+    if s and not fresh and run:
+        stale_note = f"\n<i>⚠ stats {age}с назад</i>" if age is not None else "\n<i>⚠ stats нет</i>"
+    g = lambda k: s.get(k) if s else None
     dash = lambda v: v if v is not None else "—"
     up = fmt_uptime(g("uptime_sec")) if g("uptime_sec") is not None else "—"
     log_kb = config.APP_LOG.stat().st_size // 1024 if config.APP_LOG.exists() else 0
     bad = sum(1 for _ in config.BAD_DIR.iterdir()) if config.BAD_DIR.exists() else 0
-    stories = len(load_story_refs(config.STORIES_FILE))
+    stories_g = len(load_story_refs(config.STORIES_GROUPS_FILE))
+    stories_c = len(load_story_refs(config.STORIES_CONTACTS_FILE))
     domains = len(config.load_domain_links())
     bots = len(config.load_bot_links())
     return (
@@ -281,10 +289,11 @@ def status_text():
         f"📩 Всего отправлено: <b>{dash(g('total_sent'))}</b>\n"
         f"📈 В минуту: <b>{dash(g('sent_per_min'))}</b> | ⏳ flood/мин: <b>{dash(g('flood_per_min'))}</b>\n"
         f"🧵 Активных: <b>{dash(g('active_sessions'))}/{dash(g('max_sessions'))}</b> | в очереди: <b>{dash(g('pending'))}</b>\n"
-        f"📂 sessions: <b>{count_sessions()}</b> | 📖 историй: <b>{stories}</b>\n"
+        f"📂 sessions: <b>{count_sessions()}</b>\n"
+        f"📖 истории: группы <b>{stories_g}</b> | контакты <b>{stories_c}</b>\n"
         f"🌐 доменов (redirect): <b>{domains}</b> | 🤖 ботов: <b>{bots}</b>\n"
-        f"📨 Режим: <b>📖 stories → ЛС + группы</b>\n"
+        f"📨 Режим: <b>📖 stories (отдельно группы / контакты)</b>\n"
         f"🛰 Прокси в кулдауне: <b>{dash(g('proxies_in_cooldown'))}</b>/<b>{dash(g('proxies_total'))}</b>\n"
         f"📜 app.log: <b>{log_kb} КБ</b> | 🧹 bad: <b>{bad}</b>"
-        + ("" if fresh or not run else "\n<i>⚠ статистика устарела</i>")
+        + stale_note
     )

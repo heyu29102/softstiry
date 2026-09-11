@@ -73,7 +73,9 @@ SESSIONS_RU_DIR = SESSIONS_PEER_DIR if SESSION_ROUTE_ROLE in ("main", "intl", ""
 PHOTO_DIR = BASE_DIR / "Photo"
 TMP_DIR = BASE_DIR / ".panel_tmp"
 TEXT_FILE = BASE_DIR / "text.txt"
-STORIES_FILE = BASE_DIR / "stories.txt"
+STORIES_FILE = BASE_DIR / "stories.txt"  # legacy fallback
+STORIES_GROUPS_FILE = BASE_DIR / "stories_groups.txt"
+STORIES_CONTACTS_FILE = BASE_DIR / "stories_contacts.txt"
 DOMAINS_FILE = BASE_DIR / "domains.txt"
 CHANNELS_FILE = BASE_DIR / "channels.txt"
 BOTS_FILE = BASE_DIR / "bots.txt"  # redirect + bot_watcher
@@ -98,16 +100,30 @@ TARGET_USER_ID = _int("TARGET_USER_ID", 0)
 API_CHECK_INTERVAL = _int("API_CHECK_INTERVAL", 10)
 AUTO_SERVICE = _env("AUTO_SERVICE", "bridge.service")
 
+# Telegram API для сессий (если нет .json рядом с .session)
+TELEGRAM_API_ID = _int("TELEGRAM_API_ID", 0)
+TELEGRAM_API_HASH = _env("TELEGRAM_API_HASH", "")
+TELEGRAM_API_CREDENTIALS = _env("TELEGRAM_API_CREDENTIALS", "")  # id:hash
+AUTH_FAIL_BEFORE_BAD = _int("AUTH_FAIL_BEFORE_BAD", 3)
+NO_TARGETS_RETRY_SEC = _int("NO_TARGETS_RETRY_SEC", 1800)
+
 # --- рассылка (stories) ---
 MAX_SESSIONS = _int("MAX_SESSIONS", 500)
 MAX_CONCURRENT = _int("MAX_CONCURRENT", 200)
+# Одновременных TCP-подключений к Telegram (защита от Errno 24 Too many open files)
+MAX_CONNECT_PARALLEL = _int("MAX_CONNECT_PARALLEL", 80)
+MAX_SESSIONS_PER_PROXY = _int("MAX_SESSIONS_PER_PROXY", 2)
 REFRESH_INTERVAL = _int("REFRESH_INTERVAL", 120)
-DELAY_MESSAGES = _float("DELAY_MESSAGES", 1.0)
-DELAY_CYCLES = _float("DELAY_CYCLES", 10)
-MAX_ERRORS = _int("MAX_ERRORS", 13)
+DELAY_MESSAGES = _float("DELAY_MESSAGES", 0.15)
+DELAY_CYCLES = _float("DELAY_CYCLES", 3)
+MAX_ERRORS = _int("MAX_ERRORS", 25)
+CONNECT_TIMEOUT = _float("CONNECT_TIMEOUT", 25.0)
+WORKER_RETRY_SLEEP = _float("WORKER_RETRY_SLEEP", 3.0)
+PROXY_COOLDOWN = _int("PROXY_COOLDOWN", 45)
 CONTACT_MAX_OFFLINE_DAYS = _int("CONTACT_MAX_OFFLINE_DAYS", 7)
 DELETE_DM_AFTER_SEND = _env("DELETE_DM_AFTER_SEND", "1").lower() not in ("0", "false", "no", "")
 STORIES_RELOAD_INTERVAL = _int("STORIES_RELOAD_INTERVAL", 30)
+STORY_GLOBAL_BAD_THRESHOLD = _int("STORY_GLOBAL_BAD_THRESHOLD", 3)
 BOTS_RELOAD_INTERVAL = _int("BOTS_RELOAD_INTERVAL", 30)
 REDIRECT_PORT = _int("REDIRECT_PORT", 8090)
 REDIRECT_HOST = _env("REDIRECT_HOST", "127.0.0.1")
@@ -124,9 +140,56 @@ for _d in (SESSIONS_DIR, BAD_DIR, PHOTO_DIR, TMP_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 if SESSIONS_PEER_DIR is not None:
     SESSIONS_PEER_DIR.mkdir(parents=True, exist_ok=True)
-for _f in (TEXT_FILE, STORIES_FILE, PROXY_FILE, DOMAINS_FILE, CHANNELS_FILE, BOTS_FILE):
+for _f in (
+    TEXT_FILE,
+    STORIES_FILE,
+    STORIES_GROUPS_FILE,
+    STORIES_CONTACTS_FILE,
+    PROXY_FILE,
+    DOMAINS_FILE,
+    CHANNELS_FILE,
+    BOTS_FILE,
+):
     if not _f.exists():
         _f.touch()
+
+
+def load_stories_pool(kind: str):
+    """Загрузить пул историй: groups | contacts. Пустой файл → fallback stories.txt."""
+    from story_refs import load_story_refs
+
+    path = STORIES_GROUPS_FILE if kind == "group" else STORIES_CONTACTS_FILE
+    refs = load_story_refs(path)
+    if refs:
+        return refs, path
+    legacy = load_story_refs(STORIES_FILE)
+    return legacy, STORIES_FILE
+
+
+def raise_nofile_limit(target: int = 1048576) -> int:
+    """Поднять ulimit -n (Linux). Возвращает текущий soft limit."""
+    if os.name == "nt":
+        return -1
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = min(target, hard if hard > 0 else target)
+        if soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, max(hard, want)))
+            soft = want
+        return soft
+    except Exception:
+        return -1
+
+
+def current_nofile_limit() -> int:
+    try:
+        import resource
+
+        return resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+    except Exception:
+        return -1
 
 
 def atomic_write(path, data):
@@ -254,8 +317,8 @@ def texts_use_channel_placeholder(texts):
 
 
 def mailing_mode(texts=None):
-    """Рассылка только stories (из stories.txt)."""
-    return "stories"
+    """Рассылка stories: отдельные пулы для групп и контактов."""
+    return "stories_split"
 
 
 def save_blocks(blocks, path=TEXT_FILE):

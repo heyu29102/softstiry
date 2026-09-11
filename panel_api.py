@@ -64,8 +64,8 @@ async def api_loop(bot):
                                     for a in config.ADMIN_IDS:
                                         await bot.send_message(
                                             a,
-                                            f"🌐 API: +{res['added']} / обновлено {res['updated']}. "
-                                            f"Сессий: {count_sessions()}{routed}",
+                                            f"🌐 API: +{res['added']} сесс. / обновлено {res['updated']}. "
+                                            f"Всего сессий: {count_sessions()}{routed}",
                                         )
                         finally:
                             if not consumed:

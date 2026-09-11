@@ -76,7 +76,7 @@ async def import_sessions_doc(message, fname, tmp, is_rar):
         await message.answer("В пакете нет .session.")
     elif res["added"] + res["updated"] == 0:
         await message.answer(f"Изменений нет. Сессий: <b>{total}</b>{routed_line}")
-    elif res["added"] == 1 and res["updated"] == 0 and res["files"] == 1:
+    elif res["added"] == 1 and res["updated"] == 0:
         who = f" {esc(phone_hint)}" if phone_hint else ""
         await message.answer(f"Новая сессия{who} загружена! Сессий: <b>{total}</b>{routed_line}")
     else:

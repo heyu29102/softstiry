@@ -40,6 +40,25 @@ def import_sync(fname, tmp, is_rar, phone_hint=""):
         "routed_updated": 0,
     }
 
+    def _json_dest_dir(session_stem: str) -> Path:
+        session_name = f"{session_stem}.session"
+        for dest_dir in (config.SESSIONS_DIR, config.SESSIONS_PEER_DIR):
+            if dest_dir is None:
+                continue
+            if (dest_dir / session_name).exists():
+                return dest_dir
+        return config.SESSIONS_DIR
+
+    def write_json(base, data):
+        """Метаданные к .session — не считается отдельной сессией."""
+        base = clean_name(base)
+        if not base.lower().endswith(".json"):
+            return
+        stem = os.path.splitext(base)[0]
+        dest_dir = _json_dest_dir(stem)
+        target = dest_dir / base
+        config.atomic_write(target, data)
+
     def write(base, data):
         base = clean_name(base)
         if not base.lower().endswith(".session"):
@@ -80,20 +99,34 @@ def import_sync(fname, tmp, is_rar, phone_hint=""):
         write(fname, tmp.read_bytes())
     elif low.endswith(".zip") and not is_rar:
         with zipfile.ZipFile(tmp) as z:
+            entries = []
             for m in z.infolist():
                 b = os.path.basename(m.filename)
-                if b.lower().endswith(".session"):
+                if b.lower().endswith((".session", ".json")):
                     with z.open(m) as src:
-                        write(b, src.read())
+                        entries.append((b, src.read()))
+            for b, data in entries:
+                if b.lower().endswith(".session"):
+                    write(b, data)
+            for b, data in entries:
+                if b.lower().endswith(".json"):
+                    write_json(b, data)
     elif low.endswith(".rar") and is_rar:
         if not RAR_OK:
             raise RuntimeError("rarfile не установлен")
         with rarfile.RarFile(tmp) as rf:
+            entries = []
             for m in rf.infolist():
                 b = os.path.basename(m.filename)
-                if b.lower().endswith(".session"):
+                if b.lower().endswith((".session", ".json")):
                     with rf.open(m) as src:
-                        write(b, src.read())
+                        entries.append((b, src.read()))
+            for b, data in entries:
+                if b.lower().endswith(".session"):
+                    write(b, data)
+            for b, data in entries:
+                if b.lower().endswith(".json"):
+                    write_json(b, data)
     else:
         raise ValueError("Только .session / .zip / .rar")
     return res
